@@ -10,7 +10,6 @@ import homeassistant.util.dt as dt_util
 from custom_components.wholesale_ev_schedule.const import (
     CONF_CHARGER_CONNECTED_STATES,
     CONF_FORECAST_ENTITY,
-    CONF_GAMBLE_TOLERANCE,
     CONF_RATE_START_KEY,
     CONF_RATE_UNIT_MULTIPLIER,
     CONF_RATE_VALUE_KEY,
@@ -131,9 +130,9 @@ async def test_missing_forecast_entity_still_schedules_from_actual_rates_only(ha
 
 
 async def test_gamble_tolerance_zero_excludes_predicted_only_data(hass):
-    options = {**FULL_OPTIONS, CONF_GAMBLE_TOLERANCE: 0.0}
-    entry = await async_setup_wholesale_entry(hass, options)
+    entry = await async_setup_wholesale_entry(hass)
     coordinator = hass.data[DOMAIN][entry.entry_id]
+    await coordinator.async_set_gamble_tolerance(0.0)
 
     now = dt_util.now()
     # Only forecast data available -- no actual rates at all.

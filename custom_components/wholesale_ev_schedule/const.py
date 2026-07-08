@@ -24,10 +24,10 @@ CONF_FORECAST_ENTITY = "forecast_entity"
 CONF_CHARGER_STATE_ENTITY = "charger_state_entity"
 CONF_CHARGER_CONNECTED_STATES = "charger_connected_states"
 
-# Config / options keys — scheduling tolerances.
-CONF_GAMBLE_TOLERANCE = "gamble_tolerance"
-CONF_MIN_BLOCK_HOURS = "min_block_hours"
-CONF_MAX_PRICE = "max_price"
+# Config / options keys — timing only. Gamble tolerance, min/max block hours,
+# and max price used to live here too, but those are the kind of thing you
+# tweak day-to-day — they're now live `number` entities (see coordinator.py)
+# rather than config-flow options that require a reload to change.
 CONF_UPDATE_INTERVAL_MINUTES = "update_interval_minutes"
 
 # Config / options keys — which named provider (see providers.py) supplies each
@@ -51,6 +51,9 @@ CONF_FORECAST_PRICE_KEY = "forecast_price_key"
 DEFAULT_CHARGER_CONNECTED_STATES = "charger_insert,charger_pause,charger_end,charger_charging,charger_wait"
 DEFAULT_GAMBLE_TOLERANCE = 50.0
 DEFAULT_MIN_BLOCK_HOURS = 1.0
+# 0 is the "unlimited" sentinel — no cap on how long a single contiguous
+# charging block may be, matching the pre-existing (pyscript) behaviour.
+DEFAULT_MAX_BLOCK_HOURS = 0.0
 DEFAULT_MAX_PRICE = 20.0
 DEFAULT_UPDATE_INTERVAL_MINUTES = 5
 

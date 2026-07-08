@@ -27,6 +27,7 @@ from custom_components.wholesale_ev_schedule.scheduler import (
     parse_iso_str,
     prune_and_classify,
     slots_to_sessions,
+    summarize_prices,
 )
 
 NOW = datetime(2024, 1, 15, 10, 0)
@@ -227,6 +228,78 @@ def test_find_optimal_slots_skips_a_window_too_large_for_the_remaining_need():
     assert run_b[2]["date_time"] not in result_dts
 
 
+def test_find_optimal_slots_caps_individual_window_size_with_max_block_hours():
+    # A single uniformly-cheap 4-slot (2h) run, required=4 slots, capped at 1h
+    # (2 slots) per block. The cap limits how large any one *window* can be
+    # during selection, but doesn't force an artificial rest period — since
+    # all 4 slots are equally cheap and adjacent, the two capped windows the
+    # optimizer picks still end up back-to-back with no gap between them
+    # (see the max_block_hours docstring). What the cap does guarantee is
+    # that no single window's price average spans more than the cap.
+    run = make_slots(NOW, 4, price=1.0)
+    slots = assign_credibilities(run, NOW, gamble_tolerance=100.0)
+
+    result = find_optimal_slots(
+        slots, required_slots=4, ready_by_dt=NOW + timedelta(hours=5),
+        min_block_hours=0.5, max_block_hours=1.0,
+    )
+
+    assert {s["date_time"] for s in result} == {s["date_time"] for s in run}
+
+
+def test_find_optimal_slots_max_block_hours_produces_a_real_gap_around_a_price_spike():
+    # Six contiguous slots priced [1, 1, 5, 5, 1, 1] — two genuinely separate
+    # cheap dips either side of an expensive middle pair. required=4 slots
+    # (2h), max_block_hours=1h (2 slots): the optimizer should pick the two
+    # cheap pairs and skip the expensive middle, landing as two separate
+    # sessions with a real gap between them.
+    prices = [1.0, 1.0, 5.0, 5.0, 1.0, 1.0]
+    run = [
+        {"date_time": NOW + timedelta(minutes=30 * i), "raw_price": p, "source": "current_actual"}
+        for i, p in enumerate(prices)
+    ]
+    slots = assign_credibilities(run, NOW, gamble_tolerance=100.0)
+
+    result = find_optimal_slots(
+        slots, required_slots=4, ready_by_dt=NOW + timedelta(hours=5),
+        min_block_hours=1.0, max_block_hours=1.0,
+    )
+
+    sessions = build_contiguous_runs(sorted(result, key=lambda s: s["date_time"]))
+    assert len(sessions) == 2
+    assert all(len(session) == 2 for session in sessions)
+    picked_prices = {s["raw_price"] for s in result}
+    assert picked_prices == {1.0}  # the expensive middle pair must be excluded
+
+
+def test_find_optimal_slots_max_block_hours_none_is_unlimited():
+    run = make_slots(NOW, 4, price=1.0)
+    slots = assign_credibilities(run, NOW, gamble_tolerance=100.0)
+
+    result = find_optimal_slots(
+        slots, required_slots=4, ready_by_dt=NOW + timedelta(hours=5),
+        min_block_hours=0.5, max_block_hours=None,
+    )
+
+    sessions = build_contiguous_runs(sorted(result, key=lambda s: s["date_time"]))
+    assert len(sessions) == 1  # no cap -> the whole run is offered as one block
+
+
+def test_find_optimal_slots_max_block_hours_zero_means_unlimited():
+    # 0 is the "unlimited" sentinel used by the live number entity (its
+    # minimum value), matching the None case above.
+    run = make_slots(NOW, 4, price=1.0)
+    slots = assign_credibilities(run, NOW, gamble_tolerance=100.0)
+
+    result = find_optimal_slots(
+        slots, required_slots=4, ready_by_dt=NOW + timedelta(hours=5),
+        min_block_hours=0.5, max_block_hours=0,
+    )
+
+    sessions = build_contiguous_runs(sorted(result, key=lambda s: s["date_time"]))
+    assert len(sessions) == 1
+
+
 def test_slots_to_sessions_groups_contiguous_runs():
     run1 = make_slots(NOW, 2, price=10.0)
     run2 = make_slots(NOW + timedelta(hours=3), 2, price=20.0)
@@ -368,3 +441,49 @@ def test_deduplicate_sorts_chronologically():
     result = deduplicate_and_sort_prices([later, earlier], NOW)
 
     assert [r["date_time"] for r in result] == [earlier["date_time"], later["date_time"]]
+
+
+# ---------------------------------------------------------------------------
+# summarize_prices
+# ---------------------------------------------------------------------------
+
+def test_summarize_prices_empty():
+    assert summarize_prices([], NOW) == {
+        "count": 0,
+        "cheapest_price": None,
+        "most_expensive_price": None,
+        "average_price": None,
+        "average_price_next_window": None,
+        "source_counts": {},
+    }
+
+
+def test_summarize_prices_basic_stats():
+    slots = [
+        {"date_time": NOW, "raw_price": 10.0, "source": "current_actual"},
+        {"date_time": NOW + timedelta(minutes=30), "raw_price": 20.0, "source": "current_actual"},
+        {"date_time": NOW + timedelta(hours=1), "raw_price": 30.0, "source": "predicted"},
+    ]
+    summary = summarize_prices(slots, NOW, window_hours=24.0)
+
+    assert summary["count"] == 3
+    assert summary["cheapest_price"] == 10.0
+    assert summary["most_expensive_price"] == 30.0
+    assert summary["average_price"] == 20.0
+    assert summary["source_counts"] == {"current_actual": 2, "predicted": 1}
+
+
+def test_summarize_prices_next_window_excludes_slots_outside_the_window():
+    inside = {"date_time": NOW + timedelta(hours=1), "raw_price": 10.0, "source": "current_actual"}
+    outside = {"date_time": NOW + timedelta(hours=48), "raw_price": 1000.0, "source": "predicted"}
+
+    summary = summarize_prices([inside, outside], NOW, window_hours=24.0)
+
+    assert summary["average_price"] == 505.0  # both slots, unrestricted
+    assert summary["average_price_next_window"] == 10.0  # only the in-window slot
+
+
+def test_summarize_prices_next_window_none_when_nothing_in_window():
+    outside = {"date_time": NOW + timedelta(hours=48), "raw_price": 10.0, "source": "predicted"}
+    summary = summarize_prices([outside], NOW, window_hours=24.0)
+    assert summary["average_price_next_window"] is None

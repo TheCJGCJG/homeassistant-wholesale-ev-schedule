@@ -3,11 +3,12 @@
     "step": {
       "user": {
         "title": "Set up Wholesale EV Schedule",
-        "description": "Give this instance a unique name if you're setting up more than one (e.g. per car) — it becomes the entity_id prefix. Pick which service supplies your actual and forecast wholesale prices; \"Custom\" lets you point at an unsupported source directly.",
+        "description": "Give this instance a unique name if you're setting up more than one (e.g. per car) — it becomes the entity_id prefix. Pick which service supplies your actual and forecast wholesale prices; \"Custom\" lets you point at an unsupported source directly. Scheduling tolerances (gamble tolerance, block length, max price) are set afterwards as live entities, not here.",
         "data": {
           "name": "Name",
           "charger_state_entity": "Charger work-state sensor",
           "charger_connected_states": "Charger states meaning \"connected\" (comma separated)",
+          "update_interval_minutes": "Re-evaluate every (minutes)",
           "rates_provider": "Actual rates source",
           "forecast_provider": "Forecast source"
         }
@@ -49,15 +50,6 @@
           "forecast_price_key": "Forecast point key: price",
           "forecast_unit_multiplier": "Price multiplier (1 if already in the same unit as your actual rates)"
         }
-      },
-      "advanced": {
-        "title": "Scheduling tolerances",
-        "data": {
-          "gamble_tolerance": "Gamble tolerance",
-          "min_block_hours": "Minimum charging block length",
-          "max_price": "Maximum average price per session",
-          "update_interval_minutes": "Re-evaluate every (minutes)"
-        }
       }
     },
     "abort": {
@@ -71,6 +63,7 @@
         "data": {
           "charger_state_entity": "Charger work-state sensor",
           "charger_connected_states": "Charger states meaning \"connected\" (comma separated)",
+          "update_interval_minutes": "Re-evaluate every (minutes)",
           "rates_provider": "Actual rates source",
           "forecast_provider": "Forecast source"
         }
@@ -108,15 +101,6 @@
           "forecast_price_key": "Forecast point key: price",
           "forecast_unit_multiplier": "Price multiplier (1 if already in the same unit as your actual rates)"
         }
-      },
-      "advanced": {
-        "title": "Scheduling tolerances",
-        "data": {
-          "gamble_tolerance": "Gamble tolerance",
-          "min_block_hours": "Minimum charging block length",
-          "max_price": "Maximum average price per session",
-          "update_interval_minutes": "Re-evaluate every (minutes)"
-        }
       }
     }
   },
@@ -126,21 +110,40 @@
       "charging_schedule": { "name": "Schedule" },
       "next_slot_start": { "name": "Next slot start" },
       "next_slot_end": { "name": "Next slot end" },
-      "hours_remaining": { "name": "Hours remaining" }
+      "hours_remaining": { "name": "Hours remaining" },
+      "time_remaining": { "name": "Time remaining" },
+      "boost_ends_at": { "name": "Boost ends at" },
+      "block_count": { "name": "Block count" },
+      "upcoming_block_2_start": { "name": "Upcoming block 2 start" },
+      "upcoming_block_2_end": { "name": "Upcoming block 2 end" },
+      "upcoming_block_3_start": { "name": "Upcoming block 3 start" },
+      "upcoming_block_3_end": { "name": "Upcoming block 3 end" },
+      "candidate_price_points": { "name": "Candidate price points" },
+      "cheapest_available_price": { "name": "Cheapest available price" },
+      "most_expensive_available_price": { "name": "Most expensive available price" },
+      "average_price_next_24h": { "name": "Average price (next 24h)" },
+      "average_price_all_data": { "name": "Average price (all available data)" },
+      "price_data_sources": { "name": "Price data sources" },
+      "active_providers": { "name": "Active providers" }
     },
     "binary_sensor": {
       "charging_desired": { "name": "Charging desired" }
     },
     "number": {
       "charging_hours_required": { "name": "Charging hours required" },
-      "boost_duration_hours": { "name": "Boost duration" }
+      "boost_duration_hours": { "name": "Boost duration" },
+      "gamble_tolerance": { "name": "Gamble tolerance" },
+      "min_block_hours": { "name": "Minimum block length" },
+      "max_block_hours": { "name": "Maximum block length" },
+      "max_price": { "name": "Maximum price" }
     },
     "datetime": {
       "ready_by": { "name": "Ready by" }
     },
     "button": {
       "boost_cancel": { "name": "Cancel boost" },
-      "stop": { "name": "Stop" }
+      "stop": { "name": "Stop" },
+      "reset": { "name": "Reset" }
     }
   }
 }

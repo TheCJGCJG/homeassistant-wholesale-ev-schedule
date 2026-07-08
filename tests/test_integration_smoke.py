@@ -14,7 +14,6 @@ import homeassistant.util.dt as dt_util
 from custom_components.wholesale_ev_schedule.const import DEFAULT_NAME, DOMAIN
 
 from .factories import (
-    ADVANCED_INPUT,
     BASE_INPUT,
     EXPECTED_ENTITY_IDS,
     FORECAST_AGILE_PREDICT_INPUT,
@@ -42,10 +41,6 @@ async def test_config_flow_walks_all_steps_and_creates_entry(hass):
     assert result["step_id"] == "forecast_agile_predict"
 
     result = await hass.config_entries.flow.async_configure(result["flow_id"], FORECAST_AGILE_PREDICT_INPUT)
-    assert result["type"] == FlowResultType.FORM
-    assert result["step_id"] == "advanced"
-
-    result = await hass.config_entries.flow.async_configure(result["flow_id"], ADVANCED_INPUT)
     assert result["type"] == FlowResultType.CREATE_ENTRY
     assert result["options"] == FULL_OPTIONS
 
@@ -57,7 +52,8 @@ async def test_options_flow_walks_all_steps_and_updates_entry(hass):
     assert result["type"] == FlowResultType.FORM
     assert result["step_id"] == "init"
 
-    result = await hass.config_entries.options.async_configure(result["flow_id"], BASE_INPUT)
+    changed_base = {**BASE_INPUT, "update_interval_minutes": 15}
+    result = await hass.config_entries.options.async_configure(result["flow_id"], changed_base)
     assert result["type"] == FlowResultType.FORM
     assert result["step_id"] == "rates_octopus_energy"
 
@@ -66,15 +62,10 @@ async def test_options_flow_walks_all_steps_and_updates_entry(hass):
     assert result["step_id"] == "forecast_agile_predict"
 
     result = await hass.config_entries.options.async_configure(result["flow_id"], FORECAST_AGILE_PREDICT_INPUT)
-    assert result["type"] == FlowResultType.FORM
-    assert result["step_id"] == "advanced"
-
-    changed_advanced = {**ADVANCED_INPUT, "max_price": 15.0}
-    result = await hass.config_entries.options.async_configure(result["flow_id"], changed_advanced)
     assert result["type"] == FlowResultType.CREATE_ENTRY
     await hass.async_block_till_done()
 
-    assert entry.options["max_price"] == 15.0
+    assert entry.options["update_interval_minutes"] == 15
 
 
 async def test_setup_entry_registers_all_expected_entities(hass):

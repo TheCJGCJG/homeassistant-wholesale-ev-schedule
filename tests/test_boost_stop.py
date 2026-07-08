@@ -66,3 +66,59 @@ async def test_stop_button_clears_schedule_and_boost(hass):
     assert coordinator.required_hours == 0.0
     hours_entity = hass.states.get("number.wholesale_ev_schedule_charging_hours_required")
     assert float(hours_entity.state) == 0.0
+
+
+async def test_stop_button_does_not_clear_ready_by(hass):
+    # Distinguishes stop (cancel today, deadline still applies tomorrow) from
+    # reset (full clean slate, e.g. on charger-unplugged).
+    entry = await async_setup_wholesale_entry(hass)
+    coordinator = hass.data[DOMAIN][entry.entry_id]
+    ready_by = dt_util.now() + timedelta(hours=6)
+    await coordinator.async_set_ready_by(ready_by)
+    await coordinator.async_set_required_hours(2.0)
+
+    await hass.services.async_call(
+        "button", "press",
+        {"entity_id": "button.wholesale_ev_schedule_stop"},
+        blocking=True,
+    )
+    await hass.async_block_till_done()
+
+    assert coordinator.ready_by == ready_by
+
+
+async def test_reset_button_clears_everything_including_ready_by(hass):
+    entry = await async_setup_wholesale_entry(hass)
+    coordinator = hass.data[DOMAIN][entry.entry_id]
+    await coordinator.async_set_ready_by(dt_util.now() + timedelta(hours=6))
+    await coordinator.async_set_required_hours(2.0)
+    await coordinator.async_start_boost(1.0)
+    assert coordinator.data["state"] == "boosting"
+
+    await hass.services.async_call(
+        "button", "press",
+        {"entity_id": "button.wholesale_ev_schedule_reset"},
+        blocking=True,
+    )
+    await hass.async_block_till_done()
+
+    assert coordinator.data["state"] == "idle"
+    assert coordinator.ready_by is None
+    assert coordinator.required_hours == 0.0
+    ready_by_entity = hass.states.get("datetime.wholesale_ev_schedule_ready_by")
+    assert ready_by_entity.state == "unknown"
+
+
+async def test_boost_ends_at_sensor_reflects_boost_end_and_clears_after(hass):
+    entry = await async_setup_wholesale_entry(hass)
+    coordinator = hass.data[DOMAIN][entry.entry_id]
+
+    await coordinator.async_start_boost(2.0)
+    await hass.async_block_till_done()
+    boost_ends_at = hass.states.get("sensor.wholesale_ev_schedule_boost_ends_at")
+    assert boost_ends_at.state not in ("unknown", "unavailable", None)
+
+    await coordinator.async_cancel_boost()
+    await hass.async_block_till_done()
+    boost_ends_at = hass.states.get("sensor.wholesale_ev_schedule_boost_ends_at")
+    assert boost_ends_at.state == "unknown"

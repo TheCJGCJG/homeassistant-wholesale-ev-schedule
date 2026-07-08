@@ -1,10 +1,15 @@
 """Config flow for Wholesale EV Schedule.
 
-Steps: user/init (name + charger + pick a rates/forecast provider) -> a
-provider-specific rates step -> a provider-specific forecast step (or none) ->
-advanced (scheduling tolerances). Picking a named provider (see providers.py)
-fills in its attribute/key shape automatically; picking "custom" asks for it
-directly, so an unmodelled wholesale price source can still be wired up.
+Steps: user/init (name + charger + poll interval + pick a rates/forecast
+provider) -> a provider-specific rates step -> a provider-specific forecast
+step (or none). Picking a named provider (see providers.py) fills in its
+attribute/key shape automatically; picking "custom" asks for it directly, so
+an unmodelled wholesale price source can still be wired up.
+
+Scheduling tolerances (gamble tolerance, min/max block hours, max price)
+deliberately aren't here — they're live `number` entities (see coordinator.py
+and number.py) since they're the kind of thing you adjust day-to-day, not a
+one-time setup choice.
 """
 from __future__ import annotations
 
@@ -28,9 +33,6 @@ from .const import (
     CONF_FORECAST_PRICE_KEY,
     CONF_FORECAST_PROVIDER,
     CONF_FORECAST_UNIT_MULTIPLIER,
-    CONF_GAMBLE_TOLERANCE,
-    CONF_MAX_PRICE,
-    CONF_MIN_BLOCK_HOURS,
     CONF_NEXT_RATES_ENTITY,
     CONF_RATE_START_KEY,
     CONF_RATE_UNIT_MULTIPLIER,
@@ -39,9 +41,6 @@ from .const import (
     CONF_RATES_PROVIDER,
     CONF_UPDATE_INTERVAL_MINUTES,
     DEFAULT_CHARGER_CONNECTED_STATES,
-    DEFAULT_GAMBLE_TOLERANCE,
-    DEFAULT_MAX_PRICE,
-    DEFAULT_MIN_BLOCK_HOURS,
     DEFAULT_NAME,
     DEFAULT_RATE_UNIT_MULTIPLIER,
     DEFAULT_UPDATE_INTERVAL_MINUTES,
@@ -92,6 +91,11 @@ def base_schema(defaults: dict[str, Any], include_name: bool) -> vol.Schema:
         _with_default(
             CONF_CHARGER_CONNECTED_STATES, defaults, DEFAULT_CHARGER_CONNECTED_STATES
         ): str,
+        _with_default(
+            CONF_UPDATE_INTERVAL_MINUTES, defaults, DEFAULT_UPDATE_INTERVAL_MINUTES
+        ): selector.NumberSelector(
+            selector.NumberSelectorConfig(min=1, max=60, step=1, mode=selector.NumberSelectorMode.BOX)
+        ),
         _with_default(CONF_RATES_PROVIDER, defaults, RATE_PROVIDER_OCTOPUS_ENERGY): _provider_select(RATE_PROVIDERS),
         _with_default(
             CONF_FORECAST_PROVIDER, defaults, FORECAST_PROVIDER_AGILE_PREDICT
@@ -152,29 +156,10 @@ def forecast_custom_schema(defaults: dict[str, Any]) -> vol.Schema:
     })
 
 
-def advanced_schema(defaults: dict[str, Any]) -> vol.Schema:
-    return vol.Schema({
-        _with_default(CONF_GAMBLE_TOLERANCE, defaults, DEFAULT_GAMBLE_TOLERANCE): selector.NumberSelector(
-            selector.NumberSelectorConfig(min=0, max=100, step=5, mode=selector.NumberSelectorMode.SLIDER)
-        ),
-        _with_default(CONF_MIN_BLOCK_HOURS, defaults, DEFAULT_MIN_BLOCK_HOURS): selector.NumberSelector(
-            selector.NumberSelectorConfig(min=0.5, max=4.0, step=0.5, mode=selector.NumberSelectorMode.SLIDER)
-        ),
-        _with_default(CONF_MAX_PRICE, defaults, DEFAULT_MAX_PRICE): selector.NumberSelector(
-            selector.NumberSelectorConfig(min=0, max=200, step=1, mode=selector.NumberSelectorMode.BOX)
-        ),
-        _with_default(
-            CONF_UPDATE_INTERVAL_MINUTES, defaults, DEFAULT_UPDATE_INTERVAL_MINUTES
-        ): selector.NumberSelector(
-            selector.NumberSelectorConfig(min=1, max=60, step=1, mode=selector.NumberSelectorMode.BOX)
-        ),
-    })
-
-
 class _ProviderStepsMixin:
     """Steps shared by the initial config flow and the options flow, from the
-    rates-provider branch through to the final scheduling-tolerances step.
-    Subclasses implement `_async_finish` to actually create/update the entry.
+    rates-provider branch through to the forecast step. Subclasses implement
+    `_async_finish` to actually create/update the entry.
     """
 
     def _provider_state(self) -> dict[str, Any]:
@@ -217,7 +202,7 @@ class _ProviderStepsMixin:
         forecast_provider = state[CONF_FORECAST_PROVIDER]
         if forecast_provider == FORECAST_PROVIDER_NONE:
             state[CONF_FORECAST_ENTITY] = None
-            return await self.async_step_advanced()
+            return await self._async_finish(state)
         if forecast_provider == FORECAST_PROVIDER_CUSTOM:
             return await self.async_step_forecast_custom()
         return await self.async_step_forecast_agile_predict()
@@ -231,7 +216,7 @@ class _ProviderStepsMixin:
             state[CONF_FORECAST_DATETIME_KEY] = profile["datetime_key"]
             state[CONF_FORECAST_PRICE_KEY] = profile["price_key"]
             state[CONF_FORECAST_UNIT_MULTIPLIER] = profile["unit_multiplier"]
-            return await self.async_step_advanced()
+            return await self._async_finish(state)
 
         return self.async_show_form(
             step_id="forecast_agile_predict", data_schema=forecast_agile_predict_schema(state)
@@ -241,17 +226,9 @@ class _ProviderStepsMixin:
         state = self._provider_state()
         if user_input is not None:
             state.update(user_input)
-            return await self.async_step_advanced()
-
-        return self.async_show_form(step_id="forecast_custom", data_schema=forecast_custom_schema(state))
-
-    async def async_step_advanced(self, user_input: dict[str, Any] | None = None):
-        state = self._provider_state()
-        if user_input is not None:
-            state.update(user_input)
             return await self._async_finish(state)
 
-        return self.async_show_form(step_id="advanced", data_schema=advanced_schema(state))
+        return self.async_show_form(step_id="forecast_custom", data_schema=forecast_custom_schema(state))
 
 
 class WholesaleEvScheduleConfigFlow(_ProviderStepsMixin, ConfigFlow, domain=DOMAIN):
@@ -285,7 +262,7 @@ class WholesaleEvScheduleConfigFlow(_ProviderStepsMixin, ConfigFlow, domain=DOMA
 
 
 class WholesaleEvScheduleOptionsFlow(_ProviderStepsMixin, OptionsFlow):
-    """Edit the entity wiring, provider choice, and tolerances after setup."""
+    """Edit the entity wiring, provider choice, and poll interval after setup."""
 
     async def async_step_init(self, user_input: dict[str, Any] | None = None):
         state = self._provider_state()

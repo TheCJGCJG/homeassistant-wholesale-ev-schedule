@@ -25,7 +25,7 @@ from custom_components.wholesale_ev_schedule.providers import (
     RATE_PROVIDER_CUSTOM,
 )
 
-from .factories import ADVANCED_INPUT, BASE_INPUT, FORECAST_AGILE_PREDICT_INPUT, RATES_OCTOPUS_INPUT
+from .factories import BASE_INPUT, FORECAST_AGILE_PREDICT_INPUT, RATES_OCTOPUS_INPUT
 
 
 async def test_custom_rates_provider_routes_to_manual_fields_step(hass):
@@ -50,7 +50,6 @@ async def test_custom_rates_provider_routes_to_manual_fields_step(hass):
     assert result["step_id"] == "forecast_agile_predict"
 
     result = await hass.config_entries.flow.async_configure(result["flow_id"], FORECAST_AGILE_PREDICT_INPUT)
-    result = await hass.config_entries.flow.async_configure(result["flow_id"], ADVANCED_INPUT)
     assert result["type"] == FlowResultType.CREATE_ENTRY
     assert result["options"][CONF_RATES_ATTRIBUTE] == "forecasts"
     assert result["options"][CONF_RATE_START_KEY] == "from"
@@ -77,10 +76,6 @@ async def test_custom_forecast_provider_routes_to_manual_fields_step(hass):
         CONF_FORECAST_UNIT_MULTIPLIER: 2.0,
     }
     result = await hass.config_entries.flow.async_configure(result["flow_id"], custom_forecast_input)
-    assert result["type"] == FlowResultType.FORM
-    assert result["step_id"] == "advanced"
-
-    result = await hass.config_entries.flow.async_configure(result["flow_id"], ADVANCED_INPUT)
     assert result["type"] == FlowResultType.CREATE_ENTRY
     assert result["options"][CONF_FORECAST_ATTRIBUTE] == "predictions"
     assert result["options"][CONF_FORECAST_UNIT_MULTIPLIER] == 2.0
@@ -94,9 +89,5 @@ async def test_no_forecast_provider_skips_forecast_step_entirely(hass):
         result["flow_id"], {**BASE_INPUT, CONF_NAME: DEFAULT_NAME, "forecast_provider": FORECAST_PROVIDER_NONE}
     )
     result = await hass.config_entries.flow.async_configure(result["flow_id"], RATES_OCTOPUS_INPUT)
-    assert result["type"] == FlowResultType.FORM
-    assert result["step_id"] == "advanced"  # forecast step skipped entirely
-
-    result = await hass.config_entries.flow.async_configure(result["flow_id"], ADVANCED_INPUT)
-    assert result["type"] == FlowResultType.CREATE_ENTRY
+    assert result["type"] == FlowResultType.CREATE_ENTRY  # forecast step skipped entirely
     assert result["options"]["forecast_entity"] is None

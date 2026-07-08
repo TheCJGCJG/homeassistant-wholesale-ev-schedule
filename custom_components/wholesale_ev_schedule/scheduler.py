@@ -86,10 +86,20 @@ def find_optimal_slots(
     ready_by_dt: datetime,
     min_block_hours: float,
     max_price: float | None = None,
+    max_block_hours: float | None = None,
 ) -> list[dict]:
     """Select the cheapest combination of slots totalling required_slots, where every
     contiguous block is >= min_block_hours and (if max_price given) each block's average
     raw price <= max_price. Returns a flat list of selected slot dicts, or [] if none.
+
+    max_block_hours (if given and > 0) caps how long any single contiguous block may
+    be — a cheap run longer than this is never offered as one big window, so when the
+    cheapest slots are spread across separate price dips they get combined into
+    several smaller blocks capped at this length rather than one long one. Note this
+    is a cap on window size during selection, not an enforced rest period: if the
+    single cheapest option in the market genuinely is one long uninterrupted dip,
+    capping the window size still results in back-to-back blocks with no gap between
+    them, since there's no cost-based reason to leave a cheaper slot unpicked.
     """
     if not candidate_slots or required_slots <= 0:
         return []
@@ -97,6 +107,7 @@ def find_optimal_slots(
     # A minimum block longer than the whole requirement would make every request for
     # less than that long unschedulable, so relax it to a single contiguous block.
     min_slots_per_block = min(max(1, math.ceil(min_block_hours * 2)), required_slots)
+    max_slots_per_block = math.ceil(max_block_hours * 2) if max_block_hours else None
 
     eligible = [s for s in candidate_slots if s["date_time"] + timedelta(minutes=30) <= ready_by_dt]
     eligible.sort(key=lambda s: s["date_time"])
@@ -111,6 +122,8 @@ def find_optimal_slots(
     windows = []
     for run in valid_runs:
         max_window_size = min(required_slots, len(run))
+        if max_slots_per_block is not None:
+            max_window_size = min(max_window_size, max_slots_per_block)
         for size in range(min_slots_per_block, max_window_size + 1):
             for start_idx in range(len(run) - size + 1):
                 w_slots = run[start_idx:start_idx + size]
@@ -258,6 +271,40 @@ def deduplicate_and_sort_prices(all_prices: list[dict], now_dt: datetime) -> lis
         if dt + timedelta(minutes=30) > now_dt:
             result.append(p)
     return result
+
+
+def summarize_prices(slots: list[dict], now_dt: datetime, window_hours: float = 24.0) -> dict:
+    """Diagnostic summary of a candidate price dataset for the current cycle:
+    how many data points, their price range/average, an average restricted to
+    the next `window_hours`, and a count per source label — "how much data did
+    we have, and what did it look like" independent of whatever got scheduled.
+    """
+    if not slots:
+        return {
+            "count": 0,
+            "cheapest_price": None,
+            "most_expensive_price": None,
+            "average_price": None,
+            "average_price_next_window": None,
+            "source_counts": {},
+        }
+
+    prices = [s["raw_price"] for s in slots]
+    window_end = now_dt + timedelta(hours=window_hours)
+    window_prices = [s["raw_price"] for s in slots if now_dt <= s["date_time"] < window_end]
+
+    source_counts: dict[str, int] = {}
+    for s in slots:
+        source_counts[s["source"]] = source_counts.get(s["source"], 0) + 1
+
+    return {
+        "count": len(slots),
+        "cheapest_price": round(min(prices), 4),
+        "most_expensive_price": round(max(prices), 4),
+        "average_price": round(sum(prices) / len(prices), 4),
+        "average_price_next_window": round(sum(window_prices) / len(window_prices), 4) if window_prices else None,
+        "source_counts": source_counts,
+    }
 
 
 def determine_state(

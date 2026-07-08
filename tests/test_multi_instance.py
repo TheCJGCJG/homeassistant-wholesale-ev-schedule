@@ -10,7 +10,6 @@ from homeassistant.helpers import entity_registry as er
 from custom_components.wholesale_ev_schedule.const import DOMAIN
 
 from .factories import (
-    ADVANCED_INPUT,
     BASE_INPUT,
     FORECAST_AGILE_PREDICT_INPUT,
     RATES_OCTOPUS_INPUT,
@@ -72,11 +71,10 @@ async def test_config_flow_end_to_end_sets_prefix_from_name(hass):
     assert result["step_id"] == "rates_octopus_energy"
 
     result = await hass.config_entries.flow.async_configure(result["flow_id"], RATES_OCTOPUS_INPUT)
-    result = await hass.config_entries.flow.async_configure(result["flow_id"], FORECAST_AGILE_PREDICT_INPUT)
     assert result["type"] == FlowResultType.FORM
-    assert result["step_id"] == "advanced"
+    assert result["step_id"] == "forecast_agile_predict"
 
-    result = await hass.config_entries.flow.async_configure(result["flow_id"], ADVANCED_INPUT)
+    result = await hass.config_entries.flow.async_configure(result["flow_id"], FORECAST_AGILE_PREDICT_INPUT)
     assert result["type"] == FlowResultType.CREATE_ENTRY
     assert result["title"] == "Garage EV Schedule"
     await hass.async_block_till_done()

@@ -16,6 +16,10 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry, async_add_e
     async_add_entities([
         EvChargingHoursRequiredNumber(coordinator),
         EvChargingBoostDurationNumber(coordinator),
+        EvChargingGambleToleranceNumber(coordinator),
+        EvChargingMinBlockHoursNumber(coordinator),
+        EvChargingMaxBlockHoursNumber(coordinator),
+        EvChargingMaxPriceNumber(coordinator),
     ])
 
 
@@ -64,3 +68,96 @@ class EvChargingBoostDurationNumber(WholesaleEvScheduleEntity, NumberEntity):
         self.async_write_ha_state()
         if value > 0:
             await self.coordinator.async_start_boost(value)
+
+
+class EvChargingGambleToleranceNumber(WholesaleEvScheduleEntity, NumberEntity):
+    """How much predicted (non-actual) prices are trusted vs discounted when
+    ranking slots. 0 = actual rates only; 100 = all prices at face value."""
+
+    _attr_translation_key = "gamble_tolerance"
+    _attr_icon = "mdi:dice-multiple"
+    _attr_native_min_value = 0.0
+    _attr_native_max_value = 100.0
+    _attr_native_step = 5.0
+    _attr_native_unit_of_measurement = "%"
+    _attr_mode = NumberMode.SLIDER
+
+    def __init__(self, coordinator: WholesaleEvScheduleCoordinator) -> None:
+        super().__init__(coordinator, "number", "gamble_tolerance")
+
+    @property
+    def native_value(self) -> float:
+        return self.coordinator.gamble_tolerance
+
+    async def async_set_native_value(self, value: float) -> None:
+        await self.coordinator.async_set_gamble_tolerance(value)
+
+
+class EvChargingMinBlockHoursNumber(WholesaleEvScheduleEntity, NumberEntity):
+    """Minimum length of any single charging block, to prevent rapid charger
+    cycling."""
+
+    _attr_translation_key = "min_block_hours"
+    _attr_icon = "mdi:timer-outline"
+    _attr_native_min_value = 0.5
+    _attr_native_max_value = 4.0
+    _attr_native_step = 0.5
+    _attr_native_unit_of_measurement = "h"
+    _attr_mode = NumberMode.SLIDER
+
+    def __init__(self, coordinator: WholesaleEvScheduleCoordinator) -> None:
+        super().__init__(coordinator, "number", "min_block_hours")
+
+    @property
+    def native_value(self) -> float:
+        return self.coordinator.min_block_hours
+
+    async def async_set_native_value(self, value: float) -> None:
+        await self.coordinator.async_set_min_block_hours(value)
+
+
+class EvChargingMaxBlockHoursNumber(WholesaleEvScheduleEntity, NumberEntity):
+    """Maximum length of any single charging block. 0 means unlimited — a
+    cheap enough run can be scheduled as one long block. Set above 0 to cap
+    it, encouraging the optimizer to spread separate cheap price dips into
+    several smaller blocks instead."""
+
+    _attr_translation_key = "max_block_hours"
+    _attr_icon = "mdi:timer-sand"
+    _attr_native_min_value = 0.0
+    _attr_native_max_value = 12.0
+    _attr_native_step = 0.5
+    _attr_native_unit_of_measurement = "h"
+    _attr_mode = NumberMode.BOX
+
+    def __init__(self, coordinator: WholesaleEvScheduleCoordinator) -> None:
+        super().__init__(coordinator, "number", "max_block_hours")
+
+    @property
+    def native_value(self) -> float:
+        return self.coordinator.max_block_hours
+
+    async def async_set_native_value(self, value: float) -> None:
+        await self.coordinator.async_set_max_block_hours(value)
+
+
+class EvChargingMaxPriceNumber(WholesaleEvScheduleEntity, NumberEntity):
+    """Maximum average price per session — a session-level ceiling, not a
+    per-slot one."""
+
+    _attr_translation_key = "max_price"
+    _attr_icon = "mdi:cash"
+    _attr_native_min_value = 0.0
+    _attr_native_max_value = 200.0
+    _attr_native_step = 1.0
+    _attr_mode = NumberMode.BOX
+
+    def __init__(self, coordinator: WholesaleEvScheduleCoordinator) -> None:
+        super().__init__(coordinator, "number", "max_price")
+
+    @property
+    def native_value(self) -> float:
+        return self.coordinator.max_price
+
+    async def async_set_native_value(self, value: float) -> None:
+        await self.coordinator.async_set_max_price(value)

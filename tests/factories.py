@@ -17,9 +17,6 @@ from custom_components.wholesale_ev_schedule.const import (
     CONF_FORECAST_PRICE_KEY,
     CONF_FORECAST_PROVIDER,
     CONF_FORECAST_UNIT_MULTIPLIER,
-    CONF_GAMBLE_TOLERANCE,
-    CONF_MAX_PRICE,
-    CONF_MIN_BLOCK_HOURS,
     CONF_NEXT_RATES_ENTITY,
     CONF_RATE_START_KEY,
     CONF_RATE_UNIT_MULTIPLIER,
@@ -28,9 +25,6 @@ from custom_components.wholesale_ev_schedule.const import (
     CONF_RATES_PROVIDER,
     CONF_UPDATE_INTERVAL_MINUTES,
     DEFAULT_CHARGER_CONNECTED_STATES,
-    DEFAULT_GAMBLE_TOLERANCE,
-    DEFAULT_MAX_PRICE,
-    DEFAULT_MIN_BLOCK_HOURS,
     DEFAULT_NAME,
     DEFAULT_UPDATE_INTERVAL_MINUTES,
     DOMAIN,
@@ -48,9 +42,14 @@ FORECAST_ENTITY = "sensor.agile_predict"
 CHARGER_STATE_ENTITY = "sensor.car_charger_work_state"
 
 # Inputs matching each config-flow step's schema, for tests that walk the flow.
+# The flow is: user/init -> rates_octopus_energy -> forecast_agile_predict ->
+# (entry created). Scheduling tolerances (gamble tolerance, block hours, max
+# price) aren't part of the flow at all anymore — they're live number
+# entities set via the coordinator setters (see async_setup_wholesale_entry).
 BASE_INPUT = {
     CONF_CHARGER_STATE_ENTITY: CHARGER_STATE_ENTITY,
     CONF_CHARGER_CONNECTED_STATES: DEFAULT_CHARGER_CONNECTED_STATES,
+    CONF_UPDATE_INTERVAL_MINUTES: DEFAULT_UPDATE_INTERVAL_MINUTES,
     CONF_RATES_PROVIDER: RATE_PROVIDER_OCTOPUS_ENERGY,
     CONF_FORECAST_PROVIDER: FORECAST_PROVIDER_AGILE_PREDICT,
 }
@@ -61,20 +60,14 @@ RATES_OCTOPUS_INPUT = {
 FORECAST_AGILE_PREDICT_INPUT = {
     CONF_FORECAST_ENTITY: FORECAST_ENTITY,
 }
-ADVANCED_INPUT = {
-    CONF_GAMBLE_TOLERANCE: DEFAULT_GAMBLE_TOLERANCE,
-    CONF_MIN_BLOCK_HOURS: DEFAULT_MIN_BLOCK_HOURS,
-    CONF_MAX_PRICE: DEFAULT_MAX_PRICE,
-    CONF_UPDATE_INTERVAL_MINUTES: DEFAULT_UPDATE_INTERVAL_MINUTES,
-}
 
 _octopus_profile = RATE_PROVIDERS[RATE_PROVIDER_OCTOPUS_ENERGY]
 _agile_predict_profile = FORECAST_PROVIDERS[FORECAST_PROVIDER_AGILE_PREDICT]
 
 # The fully-resolved options dict a real flow through BASE_INPUT ->
-# RATES_OCTOPUS_INPUT -> FORECAST_AGILE_PREDICT_INPUT -> ADVANCED_INPUT would
-# produce — used to set up a config entry directly, bypassing the flow, for
-# tests that only care about the coordinator/entities.
+# RATES_OCTOPUS_INPUT -> FORECAST_AGILE_PREDICT_INPUT would produce — used to
+# set up a config entry directly, bypassing the flow, for tests that only
+# care about the coordinator/entities.
 FULL_OPTIONS = {
     **BASE_INPUT,
     **RATES_OCTOPUS_INPUT,
@@ -87,15 +80,24 @@ FULL_OPTIONS = {
     CONF_FORECAST_DATETIME_KEY: _agile_predict_profile["datetime_key"],
     CONF_FORECAST_PRICE_KEY: _agile_predict_profile["price_key"],
     CONF_FORECAST_UNIT_MULTIPLIER: _agile_predict_profile["unit_multiplier"],
-    **ADVANCED_INPUT,
 }
 
 _ENTITY_SUFFIXES = {
-    "sensor": ["charging_state", "charging_schedule", "next_slot_start", "next_slot_end", "hours_remaining"],
+    "sensor": [
+        "charging_state", "charging_schedule", "next_slot_start", "next_slot_end",
+        "hours_remaining", "time_remaining", "boost_ends_at", "block_count",
+        "upcoming_block_2_start", "upcoming_block_2_end",
+        "upcoming_block_3_start", "upcoming_block_3_end",
+        "candidate_price_points", "cheapest_available_price", "most_expensive_available_price",
+        "average_price_next_24h", "average_price_all_data", "price_data_sources", "active_providers",
+    ],
     "binary_sensor": ["charging_desired"],
-    "number": ["charging_hours_required", "boost_duration_hours"],
+    "number": [
+        "charging_hours_required", "boost_duration_hours",
+        "gamble_tolerance", "min_block_hours", "max_block_hours", "max_price",
+    ],
     "datetime": ["ready_by"],
-    "button": ["boost_cancel", "stop"],
+    "button": ["boost_cancel", "stop", "reset"],
 }
 
 
