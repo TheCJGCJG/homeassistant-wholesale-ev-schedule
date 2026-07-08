@@ -8,6 +8,7 @@ PLATFORMS = [
     Platform.NUMBER,
     Platform.DATETIME,
     Platform.BUTTON,
+    Platform.SELECT,
 ]
 
 # Default value for CONF_NAME — this is slugified into the entity_id prefix
@@ -21,8 +22,6 @@ DEFAULT_NAME = "Wholesale EV Schedule"
 CONF_CURRENT_RATES_ENTITY = "current_rates_entity"
 CONF_NEXT_RATES_ENTITY = "next_rates_entity"
 CONF_FORECAST_ENTITY = "forecast_entity"
-CONF_CHARGER_STATE_ENTITY = "charger_state_entity"
-CONF_CHARGER_CONNECTED_STATES = "charger_connected_states"
 
 # Config / options keys — timing only. Gamble tolerance, min/max block hours,
 # and max price used to live here too, but those are the kind of thing you
@@ -48,7 +47,16 @@ CONF_FORECAST_ATTRIBUTE = "forecast_attribute"
 CONF_FORECAST_DATETIME_KEY = "forecast_datetime_key"
 CONF_FORECAST_PRICE_KEY = "forecast_price_key"
 
-DEFAULT_CHARGER_CONNECTED_STATES = "charger_insert,charger_pause,charger_end,charger_charging,charger_wait"
+# Manual override for the charging_desired output — deliberately not tied to
+# any charger-specific "work state" entity, so this integration doesn't need
+# to know anything about your particular charger brand. Wire desired to
+# whatever actually controls your charger (a switch, an API call, etc) and
+# use this to force it on/off regardless of the computed schedule.
+CHARGE_OVERRIDE_AUTO = "auto"
+CHARGE_OVERRIDE_FORCE_ON = "force_on"
+CHARGE_OVERRIDE_FORCE_OFF = "force_off"
+DEFAULT_CHARGE_OVERRIDE = CHARGE_OVERRIDE_AUTO
+
 DEFAULT_GAMBLE_TOLERANCE = 50.0
 DEFAULT_MIN_BLOCK_HOURS = 1.0
 # 0 is the "unlimited" sentinel — no cap on how long a single contiguous

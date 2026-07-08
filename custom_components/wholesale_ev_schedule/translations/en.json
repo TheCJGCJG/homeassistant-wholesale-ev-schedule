@@ -3,11 +3,9 @@
     "step": {
       "user": {
         "title": "Set up Wholesale EV Schedule",
-        "description": "Give this instance a unique name if you're setting up more than one (e.g. per car) — it becomes the entity_id prefix. Pick which service supplies your actual and forecast wholesale prices; \"Custom\" lets you point at an unsupported source directly. Scheduling tolerances (gamble tolerance, block length, max price) are set afterwards as live entities, not here.",
+        "description": "Give this instance a unique name if you're setting up more than one (e.g. per car) — it becomes the entity_id prefix. Pick which service supplies your actual and forecast wholesale prices; \"Custom\" lets you point at an unsupported source directly. Scheduling tolerances (gamble tolerance, block length, max price) and the manual charge override are set afterwards as live entities, not here.",
         "data": {
           "name": "Name",
-          "charger_state_entity": "Charger work-state sensor",
-          "charger_connected_states": "Charger states meaning \"connected\" (comma separated)",
           "update_interval_minutes": "Re-evaluate every (minutes)",
           "rates_provider": "Actual rates source",
           "forecast_provider": "Forecast source"
@@ -61,8 +59,6 @@
       "init": {
         "title": "Wholesale EV Schedule: entity wiring",
         "data": {
-          "charger_state_entity": "Charger work-state sensor",
-          "charger_connected_states": "Charger states meaning \"connected\" (comma separated)",
           "update_interval_minutes": "Re-evaluate every (minutes)",
           "rates_provider": "Actual rates source",
           "forecast_provider": "Forecast source"
@@ -139,6 +135,16 @@
     },
     "datetime": {
       "ready_by": { "name": "Ready by" }
+    },
+    "select": {
+      "charge_override": {
+        "name": "Charge override",
+        "state": {
+          "auto": "Auto",
+          "force_on": "Force on",
+          "force_off": "Force off"
+        }
+      }
     },
     "button": {
       "boost_cancel": { "name": "Cancel boost" },

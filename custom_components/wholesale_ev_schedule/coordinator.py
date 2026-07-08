@@ -14,8 +14,8 @@ from homeassistant.util import slugify
 import homeassistant.util.dt as dt_util
 
 from .const import (
-    CONF_CHARGER_CONNECTED_STATES,
-    CONF_CHARGER_STATE_ENTITY,
+    CHARGE_OVERRIDE_FORCE_OFF,
+    CHARGE_OVERRIDE_FORCE_ON,
     CONF_CURRENT_RATES_ENTITY,
     CONF_FORECAST_ATTRIBUTE,
     CONF_FORECAST_DATETIME_KEY,
@@ -30,6 +30,7 @@ from .const import (
     CONF_RATES_ATTRIBUTE,
     CONF_RATES_PROVIDER,
     CONF_UPDATE_INTERVAL_MINUTES,
+    DEFAULT_CHARGE_OVERRIDE,
     DEFAULT_FORECAST_ATTRIBUTE,
     DEFAULT_FORECAST_DATETIME_KEY,
     DEFAULT_FORECAST_PRICE_KEY,
@@ -95,6 +96,7 @@ class WholesaleEvScheduleCoordinator(DataUpdateCoordinator[dict]):
         self.min_block_hours: float = DEFAULT_MIN_BLOCK_HOURS
         self.max_block_hours: float = DEFAULT_MAX_BLOCK_HOURS
         self.max_price: float = DEFAULT_MAX_PRICE
+        self.charge_override: str = DEFAULT_CHARGE_OVERRIDE
 
         self._stored_sessions: list[dict] = []
         self._boost_end: datetime | None = None
@@ -129,6 +131,7 @@ class WholesaleEvScheduleCoordinator(DataUpdateCoordinator[dict]):
         self.min_block_hours = data.get("min_block_hours", DEFAULT_MIN_BLOCK_HOURS)
         self.max_block_hours = data.get("max_block_hours", DEFAULT_MAX_BLOCK_HOURS)
         self.max_price = data.get("max_price", DEFAULT_MAX_PRICE)
+        self.charge_override = data.get("charge_override", DEFAULT_CHARGE_OVERRIDE)
         self._stored_sessions = data.get("sessions", [])
         self._boost_end = parse_dt(data["boost_end"]) if data.get("boost_end") else None
 
@@ -140,6 +143,7 @@ class WholesaleEvScheduleCoordinator(DataUpdateCoordinator[dict]):
             "min_block_hours": self.min_block_hours,
             "max_block_hours": self.max_block_hours,
             "max_price": self.max_price,
+            "charge_override": self.charge_override,
             "sessions": self._stored_sessions,
             "boost_end": self._boost_end.isoformat() if self._boost_end else None,
         })
@@ -171,6 +175,11 @@ class WholesaleEvScheduleCoordinator(DataUpdateCoordinator[dict]):
 
     async def async_set_max_price(self, value: float) -> None:
         self.max_price = value
+        await self._async_save_stored_state()
+        await self.async_refresh()
+
+    async def async_set_charge_override(self, value: str) -> None:
+        self.charge_override = value
         await self._async_save_stored_state()
         await self.async_refresh()
 
@@ -282,16 +291,6 @@ class WholesaleEvScheduleCoordinator(DataUpdateCoordinator[dict]):
             + self._parse_forecast_entity(options.get(CONF_FORECAST_ENTITY))
         )
 
-    def _charger_connected(self) -> bool:
-        options = self._options
-        entity = self._entity_state(options.get(CONF_CHARGER_STATE_ENTITY))
-        if not entity:
-            return False
-        connected_states = {
-            s.strip() for s in options.get(CONF_CHARGER_CONNECTED_STATES, "").split(",") if s.strip()
-        }
-        return entity.state in connected_states
-
     def _compute_sessions(self, all_prices: list[dict], now_dt: datetime) -> list[dict]:
         active_session, _ = prune_and_classify(self._stored_sessions, now_dt)
         now_prices = deduplicate_and_sort_prices(all_prices, now_dt)
@@ -360,6 +359,15 @@ class WholesaleEvScheduleCoordinator(DataUpdateCoordinator[dict]):
         result.setdefault("boost_end", None)
         result.setdefault("upcoming_slots", [])
         result["block_count"] = len(result.get("sessions", []))
+
+        # The manual override is the final word on `desired`, applied after
+        # everything else — "force off" means off no matter what the schedule
+        # or an active boost say, and vice versa for "force on".
+        result["charge_override"] = self.charge_override
+        if self.charge_override == CHARGE_OVERRIDE_FORCE_ON:
+            result["desired"] = True
+        elif self.charge_override == CHARGE_OVERRIDE_FORCE_OFF:
+            result["desired"] = False
         return result
 
     def _idle_result(self, now_dt: datetime, price_summary: dict) -> dict:
@@ -408,7 +416,7 @@ class WholesaleEvScheduleCoordinator(DataUpdateCoordinator[dict]):
         )
         return self._with_diagnostics({
             "state": sm_state,
-            "desired": self._charger_connected() and sm_state == "charging",
+            "desired": sm_state == "charging",
             "sessions": sessions, "active_slot": active,
             "next_slot": future[0] if future else None,
             "upcoming_slots": future,

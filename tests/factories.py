@@ -8,8 +8,6 @@ from homeassistant.util import slugify
 from pytest_homeassistant_custom_component.common import MockConfigEntry
 
 from custom_components.wholesale_ev_schedule.const import (
-    CONF_CHARGER_CONNECTED_STATES,
-    CONF_CHARGER_STATE_ENTITY,
     CONF_CURRENT_RATES_ENTITY,
     CONF_FORECAST_ATTRIBUTE,
     CONF_FORECAST_DATETIME_KEY,
@@ -24,7 +22,6 @@ from custom_components.wholesale_ev_schedule.const import (
     CONF_RATES_ATTRIBUTE,
     CONF_RATES_PROVIDER,
     CONF_UPDATE_INTERVAL_MINUTES,
-    DEFAULT_CHARGER_CONNECTED_STATES,
     DEFAULT_NAME,
     DEFAULT_UPDATE_INTERVAL_MINUTES,
     DOMAIN,
@@ -39,16 +36,15 @@ from custom_components.wholesale_ev_schedule.providers import (
 CURRENT_RATES_ENTITY = "event.octopus_energy_electricity_current_day_rates"
 NEXT_RATES_ENTITY = "event.octopus_energy_electricity_next_day_rates"
 FORECAST_ENTITY = "sensor.agile_predict"
-CHARGER_STATE_ENTITY = "sensor.car_charger_work_state"
 
 # Inputs matching each config-flow step's schema, for tests that walk the flow.
 # The flow is: user/init -> rates_octopus_energy -> forecast_agile_predict ->
 # (entry created). Scheduling tolerances (gamble tolerance, block hours, max
-# price) aren't part of the flow at all anymore — they're live number
-# entities set via the coordinator setters (see async_setup_wholesale_entry).
+# price) and the manual charge override aren't part of the flow at all — they're
+# live number/select entities set via the coordinator setters (see
+# async_setup_wholesale_entry). There's no charger-state entity wiring either;
+# charging_desired is computed purely from the schedule + the override.
 BASE_INPUT = {
-    CONF_CHARGER_STATE_ENTITY: CHARGER_STATE_ENTITY,
-    CONF_CHARGER_CONNECTED_STATES: DEFAULT_CHARGER_CONNECTED_STATES,
     CONF_UPDATE_INTERVAL_MINUTES: DEFAULT_UPDATE_INTERVAL_MINUTES,
     CONF_RATES_PROVIDER: RATE_PROVIDER_OCTOPUS_ENERGY,
     CONF_FORECAST_PROVIDER: FORECAST_PROVIDER_AGILE_PREDICT,
@@ -97,6 +93,7 @@ _ENTITY_SUFFIXES = {
         "gamble_tolerance", "min_block_hours", "max_block_hours", "max_price",
     ],
     "datetime": ["ready_by"],
+    "select": ["charge_override"],
     "button": ["boost_cancel", "stop", "reset"],
 }
 
@@ -142,10 +139,6 @@ def octopus_rate_points(start: datetime, count: int, price_gbp_per_kwh: float, s
 
 def set_octopus_rate_entity(hass, entity_id: str, points: list[dict]) -> None:
     hass.states.async_set(entity_id, "populated", {"rates": points})
-
-
-def set_charger_state(hass, state: str) -> None:
-    hass.states.async_set(CHARGER_STATE_ENTITY, state, {})
 
 
 async def async_setup_wholesale_entry(hass, options: dict | None = None, name: str = DEFAULT_NAME) -> MockConfigEntry:

@@ -315,10 +315,10 @@ def determine_state(
     hours_remaining: float,
     data_ok: bool,
 ) -> str:
-    """Return the state name for the current conditions. charger_connected is
-    intentionally not a parameter — the state reflects what is scheduled regardless
-    of connection; `desired` is gated on connection separately by the caller so the
-    schedule stays visible on the dashboard even when the car is unplugged."""
+    """Return the state name for the current conditions. This reflects what is
+    scheduled, independent of the manual charge_override the coordinator applies
+    separately to `desired` — the schedule itself stays visible on the dashboard
+    regardless of any override in effect."""
     if not data_ok:
         return "error"
     if required_hours is None or required_hours <= 0:

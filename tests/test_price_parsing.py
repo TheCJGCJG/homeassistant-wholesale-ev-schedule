@@ -1,14 +1,12 @@
 """Coordinator-level tests for configuration variants: custom price-entity
-shapes, missing optional entities, gamble tolerance, and charger connected
-states — the axes that make this integration "highly configurable" beyond the
-Octopus Energy defaults.
+shapes, missing optional entities, and gamble tolerance — the axes that make
+this integration "highly configurable" beyond the Octopus Energy defaults.
 """
 from datetime import timedelta
 
 import homeassistant.util.dt as dt_util
 
 from custom_components.wholesale_ev_schedule.const import (
-    CONF_CHARGER_CONNECTED_STATES,
     CONF_FORECAST_ENTITY,
     CONF_RATE_START_KEY,
     CONF_RATE_UNIT_MULTIPLIER,
@@ -19,14 +17,12 @@ from custom_components.wholesale_ev_schedule.const import (
 from custom_components.wholesale_ev_schedule.scheduler import parse_dt
 
 from .factories import (
-    CHARGER_STATE_ENTITY,
     CURRENT_RATES_ENTITY,
     FORECAST_ENTITY,
     FULL_OPTIONS,
     NEXT_RATES_ENTITY,
     async_setup_wholesale_entry,
     octopus_rate_points,
-    set_charger_state,
     set_octopus_rate_entity,
 )
 
@@ -149,34 +145,3 @@ async def test_gamble_tolerance_zero_excludes_predicted_only_data(hass):
     # gamble_tolerance<=0 hard-excludes predicted-only data, so nothing can be
     # scheduled even though cheap forecast prices exist.
     assert coordinator.data["sessions"] == []
-
-
-async def test_custom_charger_connected_states_drive_desired(hass):
-    options = {**FULL_OPTIONS, CONF_CHARGER_CONNECTED_STATES: "plugged_in,topping_up"}
-    entry = await async_setup_wholesale_entry(hass, options)
-    coordinator = hass.data[DOMAIN][entry.entry_id]
-
-    now = dt_util.now()
-    set_octopus_rate_entity(hass, CURRENT_RATES_ENTITY, octopus_rate_points(now, 6, 0.05))
-    set_octopus_rate_entity(hass, NEXT_RATES_ENTITY, [])
-    set_charger_state(hass, "plugged_in")
-
-    await _schedule_after(hass, coordinator, ready_in_hours=3, required_hours=1.0)
-
-    assert coordinator.data["state"] == "charging"
-    assert coordinator.data["desired"] is True
-
-
-async def test_charger_state_outside_connected_states_keeps_desired_false(hass):
-    options = {**FULL_OPTIONS, CONF_CHARGER_CONNECTED_STATES: "plugged_in,topping_up"}
-    entry = await async_setup_wholesale_entry(hass, options)
-    coordinator = hass.data[DOMAIN][entry.entry_id]
-
-    now = dt_util.now()
-    set_octopus_rate_entity(hass, CURRENT_RATES_ENTITY, octopus_rate_points(now, 6, 0.05))
-    set_octopus_rate_entity(hass, NEXT_RATES_ENTITY, [])
-    set_charger_state(hass, "unplugged")
-
-    await _schedule_after(hass, coordinator, ready_in_hours=3, required_hours=1.0)
-
-    assert coordinator.data["desired"] is False

@@ -1,15 +1,19 @@
 """Config flow for Wholesale EV Schedule.
 
-Steps: user/init (name + charger + poll interval + pick a rates/forecast
-provider) -> a provider-specific rates step -> a provider-specific forecast
-step (or none). Picking a named provider (see providers.py) fills in its
-attribute/key shape automatically; picking "custom" asks for it directly, so
-an unmodelled wholesale price source can still be wired up.
+Steps: user/init (name + poll interval + pick a rates/forecast provider) -> a
+provider-specific rates step -> a provider-specific forecast step (or none).
+Picking a named provider (see providers.py) fills in its attribute/key shape
+automatically; picking "custom" asks for it directly, so an unmodelled
+wholesale price source can still be wired up.
 
-Scheduling tolerances (gamble tolerance, min/max block hours, max price)
-deliberately aren't here — they're live `number` entities (see coordinator.py
-and number.py) since they're the kind of thing you adjust day-to-day, not a
-one-time setup choice.
+Scheduling tolerances (gamble tolerance, min/max block hours, max price) and
+the manual charge_override deliberately aren't here — they're live
+`number`/`select` entities (see coordinator.py, number.py, select.py) since
+they're the kind of thing you adjust day-to-day, not a one-time setup choice.
+There's also deliberately no "charger state entity" wiring: charging_desired
+is computed purely from the schedule and the manual override, independent of
+any particular charger's own state, so this integration doesn't need to know
+anything about your charger brand.
 """
 from __future__ import annotations
 
@@ -24,8 +28,6 @@ from homeassistant.helpers import selector
 from homeassistant.util import slugify
 
 from .const import (
-    CONF_CHARGER_CONNECTED_STATES,
-    CONF_CHARGER_STATE_ENTITY,
     CONF_CURRENT_RATES_ENTITY,
     CONF_FORECAST_ATTRIBUTE,
     CONF_FORECAST_DATETIME_KEY,
@@ -40,7 +42,6 @@ from .const import (
     CONF_RATES_ATTRIBUTE,
     CONF_RATES_PROVIDER,
     CONF_UPDATE_INTERVAL_MINUTES,
-    DEFAULT_CHARGER_CONNECTED_STATES,
     DEFAULT_NAME,
     DEFAULT_RATE_UNIT_MULTIPLIER,
     DEFAULT_UPDATE_INTERVAL_MINUTES,
@@ -85,12 +86,6 @@ def base_schema(defaults: dict[str, Any], include_name: bool) -> vol.Schema:
         # this integration can run side by side without colliding.
         schema[vol.Required(CONF_NAME, default=defaults.get(CONF_NAME, DEFAULT_NAME))] = str
     schema.update({
-        _required(CONF_CHARGER_STATE_ENTITY, defaults): selector.EntitySelector(
-            selector.EntitySelectorConfig(domain="sensor")
-        ),
-        _with_default(
-            CONF_CHARGER_CONNECTED_STATES, defaults, DEFAULT_CHARGER_CONNECTED_STATES
-        ): str,
         _with_default(
             CONF_UPDATE_INTERVAL_MINUTES, defaults, DEFAULT_UPDATE_INTERVAL_MINUTES
         ): selector.NumberSelector(
