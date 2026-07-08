@@ -36,7 +36,6 @@ from .const import (
     DEFAULT_FORECAST_PRICE_KEY,
     DEFAULT_FORECAST_UNIT_MULTIPLIER,
     DEFAULT_GAMBLE_TOLERANCE,
-    DEFAULT_MAX_BLOCK_HOURS,
     DEFAULT_MAX_PRICE,
     DEFAULT_MIN_BLOCK_HOURS,
     DEFAULT_NAME,
@@ -44,6 +43,8 @@ from .const import (
     DEFAULT_RATE_UNIT_MULTIPLIER,
     DEFAULT_RATE_VALUE_KEY,
     DEFAULT_RATES_ATTRIBUTE,
+    DEFAULT_READY_BY_HOUR,
+    DEFAULT_REQUIRED_HOURS,
     DEFAULT_UPDATE_INTERVAL_MINUTES,
     DOMAIN,
     STATE_BOOSTING,
@@ -60,6 +61,7 @@ from .scheduler import (
     deduplicate_and_sort_prices,
     determine_state,
     find_optimal_slots,
+    next_ready_by,
     parse_dt,
     prune_and_classify,
     slots_to_sessions,
@@ -73,10 +75,15 @@ class WholesaleEvScheduleCoordinator(DataUpdateCoordinator[dict]):
     """Reads wholesale price entities and computes the EV charging schedule.
 
     Ready-by time, hours-required, and the scheduling tolerances (gamble
-    tolerance, min/max block length, max price) are all live, user-adjustable
+    tolerance, min block length, max price) are all live, user-adjustable
     values exposed as `datetime`/`number` entities — they're the kind of thing
     you tweak day-to-day, not one-time setup. Only entity wiring, the chosen
     price-source provider, and the poll interval live in config-entry options.
+
+    ready_by has no fixed default: it's set to the next occurrence of
+    DEFAULT_READY_BY_HOUR on first setup, and automatically rolls forward to
+    the next occurrence again once reached (see _async_update_data), so
+    "charge N hours by 7am" renews itself daily without manual resetting.
     """
 
     def __init__(self, hass: HomeAssistant, entry: ConfigEntry) -> None:
@@ -91,10 +98,9 @@ class WholesaleEvScheduleCoordinator(DataUpdateCoordinator[dict]):
         self._store = Store(hass, STORAGE_VERSION, f"{DOMAIN}_{entry.entry_id}_state")
 
         self.ready_by: datetime | None = None
-        self.required_hours: float = 0.0
+        self.required_hours: float = DEFAULT_REQUIRED_HOURS
         self.gamble_tolerance: float = DEFAULT_GAMBLE_TOLERANCE
         self.min_block_hours: float = DEFAULT_MIN_BLOCK_HOURS
-        self.max_block_hours: float = DEFAULT_MAX_BLOCK_HOURS
         self.max_price: float = DEFAULT_MAX_PRICE
         self.charge_override: str = DEFAULT_CHARGE_OVERRIDE
 
@@ -123,17 +129,20 @@ class WholesaleEvScheduleCoordinator(DataUpdateCoordinator[dict]):
         return FORECAST_PROVIDERS.get(provider_id, {}).get("label", provider_id)
 
     async def async_load_stored_state(self) -> None:
-        """Restore live inputs and the in-progress schedule after a restart."""
+        """Restore live inputs and the in-progress schedule after a restart.
+        ready_by defaults to the next DEFAULT_READY_BY_HOUR if never set."""
         data = await self._store.async_load() or {}
-        self.ready_by = parse_dt(data["ready_by"]) if data.get("ready_by") else None
-        self.required_hours = data.get("required_hours", 0.0)
+        self.ready_by = parse_dt(data["ready_by"]) if data.get("ready_by") else next_ready_by(
+            dt_util.now(), DEFAULT_READY_BY_HOUR
+        )
+        self.required_hours = data.get("required_hours", DEFAULT_REQUIRED_HOURS)
         self.gamble_tolerance = data.get("gamble_tolerance", DEFAULT_GAMBLE_TOLERANCE)
         self.min_block_hours = data.get("min_block_hours", DEFAULT_MIN_BLOCK_HOURS)
-        self.max_block_hours = data.get("max_block_hours", DEFAULT_MAX_BLOCK_HOURS)
         self.max_price = data.get("max_price", DEFAULT_MAX_PRICE)
         self.charge_override = data.get("charge_override", DEFAULT_CHARGE_OVERRIDE)
         self._stored_sessions = data.get("sessions", [])
         self._boost_end = parse_dt(data["boost_end"]) if data.get("boost_end") else None
+        await self._async_save_stored_state()
 
     async def _async_save_stored_state(self) -> None:
         await self._store.async_save({
@@ -141,7 +150,6 @@ class WholesaleEvScheduleCoordinator(DataUpdateCoordinator[dict]):
             "required_hours": self.required_hours,
             "gamble_tolerance": self.gamble_tolerance,
             "min_block_hours": self.min_block_hours,
-            "max_block_hours": self.max_block_hours,
             "max_price": self.max_price,
             "charge_override": self.charge_override,
             "sessions": self._stored_sessions,
@@ -168,11 +176,6 @@ class WholesaleEvScheduleCoordinator(DataUpdateCoordinator[dict]):
         await self._async_save_stored_state()
         await self.async_refresh()
 
-    async def async_set_max_block_hours(self, value: float) -> None:
-        self.max_block_hours = value
-        await self._async_save_stored_state()
-        await self.async_refresh()
-
     async def async_set_max_price(self, value: float) -> None:
         self.max_price = value
         await self._async_save_stored_state()
@@ -194,8 +197,10 @@ class WholesaleEvScheduleCoordinator(DataUpdateCoordinator[dict]):
         await self.async_refresh()
 
     async def async_stop(self) -> None:
-        """Cancel today's schedule and any boost, but keep ready_by — useful
-        when you've decided not to charge today but the deadline still applies
+        """Kill/end the current session: cancel today's schedule and any
+        boost, and drop required_hours to 0 (idle) — but keep ready_by and
+        every tuning preference untouched. Useful when you've decided not to
+        charge today but the same deadline and preferences still apply
         tomorrow."""
         self._stored_sessions = []
         self._boost_end = None
@@ -204,14 +209,18 @@ class WholesaleEvScheduleCoordinator(DataUpdateCoordinator[dict]):
         await self.async_refresh()
 
     async def async_reset(self) -> None:
-        """Full reset: also clears ready_by, unlike async_stop. Intended to be
-        triggered by an automation on charger-unplugged, so the next plug-in
-        starts from a completely clean slate rather than showing yesterday's
-        deadline. Scheduling tolerances (gamble tolerance, block hours, max
-        price) are left untouched — those are standing preferences, not
-        per-session state."""
-        self.ready_by = None
-        self.required_hours = 0.0
+        """Put everything back to defaults: ready_by (next DEFAULT_READY_BY_HOUR),
+        required_hours, gamble tolerance, min block hours, max price, and the
+        charge override, on top of clearing the schedule and any boost like
+        async_stop does. Intended to be triggered by an automation on
+        charger-unplugged, so the next plug-in starts from a completely clean
+        slate rather than carrying over yesterday's tweaks."""
+        self.ready_by = next_ready_by(dt_util.now(), DEFAULT_READY_BY_HOUR)
+        self.required_hours = DEFAULT_REQUIRED_HOURS
+        self.gamble_tolerance = DEFAULT_GAMBLE_TOLERANCE
+        self.min_block_hours = DEFAULT_MIN_BLOCK_HOURS
+        self.max_price = DEFAULT_MAX_PRICE
+        self.charge_override = DEFAULT_CHARGE_OVERRIDE
         self._stored_sessions = []
         self._boost_end = None
         await self._async_save_stored_state()
@@ -319,7 +328,7 @@ class WholesaleEvScheduleCoordinator(DataUpdateCoordinator[dict]):
         if slots_still_needed > 0:
             future_slots = find_optimal_slots(
                 candidate_slots, slots_still_needed, self.ready_by, self.min_block_hours,
-                max_price=self.max_price, max_block_hours=self.max_block_hours,
+                max_price=self.max_price,
             )
             future_sessions = slots_to_sessions(future_slots)
 
@@ -338,13 +347,18 @@ class WholesaleEvScheduleCoordinator(DataUpdateCoordinator[dict]):
         if self._boost_end:
             self._boost_end = None
 
-        if self.ready_by is None or self.required_hours <= 0:
+        # ready_by never just expires — once reached (or if somehow unset) it
+        # rolls forward to the next DEFAULT_READY_BY_HOUR automatically, so
+        # "charge N hours by 7am" is a standing target rather than something
+        # that needs resetting by hand every day.
+        if self.ready_by is None or self.ready_by <= now_dt:
+            self.ready_by = next_ready_by(now_dt, DEFAULT_READY_BY_HOUR)
+            await self._async_save_stored_state()
+
+        if self.required_hours <= 0:
             self._stored_sessions = []
             await self._async_save_stored_state()
             return self._idle_result(now_dt, price_summary)
-
-        if self.ready_by <= now_dt:
-            return self._error_result("Ready-by time is in the past", now_dt, price_summary)
 
         if not all_prices:
             return self._error_result("No price data available from configured entities", now_dt, price_summary)

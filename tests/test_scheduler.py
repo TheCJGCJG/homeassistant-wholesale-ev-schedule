@@ -23,6 +23,7 @@ from custom_components.wholesale_ev_schedule.scheduler import (
     determine_state,
     find_optimal_slots,
     get_source_tier,
+    next_ready_by,
     parse_dt,
     parse_iso_str,
     prune_and_classify,
@@ -487,3 +488,27 @@ def test_summarize_prices_next_window_none_when_nothing_in_window():
     outside = {"date_time": NOW + timedelta(hours=48), "raw_price": 10.0, "source": "predicted"}
     summary = summarize_prices([outside], NOW, window_hours=24.0)
     assert summary["average_price_next_window"] is None
+
+
+# ---------------------------------------------------------------------------
+# next_ready_by
+# ---------------------------------------------------------------------------
+
+def test_next_ready_by_rolls_to_tomorrow_when_past_the_hour_today():
+    now = datetime(2024, 1, 15, 15, 0)  # 3pm -- 7am has already passed today
+    assert next_ready_by(now, hour=7) == datetime(2024, 1, 16, 7, 0)
+
+
+def test_next_ready_by_stays_today_when_before_the_hour():
+    now = datetime(2024, 1, 15, 2, 0)  # 2am -- 7am is still later today
+    assert next_ready_by(now, hour=7) == datetime(2024, 1, 15, 7, 0)
+
+
+def test_next_ready_by_rolls_forward_at_the_exact_hour():
+    now = datetime(2024, 1, 15, 7, 0)  # exactly 7am -- must not return "now"
+    assert next_ready_by(now, hour=7) == datetime(2024, 1, 16, 7, 0)
+
+
+def test_next_ready_by_respects_custom_hour():
+    now = datetime(2024, 1, 15, 10, 0)
+    assert next_ready_by(now, hour=22) == datetime(2024, 1, 15, 22, 0)

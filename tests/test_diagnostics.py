@@ -50,6 +50,7 @@ async def test_price_summary_diagnostics_populate_even_when_idle(hass):
     # whether a charge is currently being planned.
     entry = await async_setup_wholesale_entry(hass)
     coordinator = hass.data[DOMAIN][entry.entry_id]
+    await coordinator.async_set_required_hours(0.0)  # required_hours defaults to DEFAULT_REQUIRED_HOURS
 
     now = dt_util.now()
     set_octopus_rate_entity(hass, CURRENT_RATES_ENTITY, octopus_rate_points(now, 4, price_gbp_per_kwh=0.10))
@@ -78,7 +79,6 @@ async def test_block_count_and_upcoming_block_sensors_reflect_multi_block_schedu
     set_octopus_rate_entity(hass, NEXT_RATES_ENTITY, [])
 
     await coordinator.async_set_min_block_hours(0.5)
-    await coordinator.async_set_max_block_hours(1.0)
     await _schedule_after(hass, coordinator, ready_in_hours=3, required_hours=2.0)
 
     block_count = hass.states.get("sensor.wholesale_ev_schedule_block_count")
@@ -129,7 +129,6 @@ async def test_tuning_number_entities_persist_via_coordinator(hass):
     for entity_id, value, attr in [
         ("number.wholesale_ev_schedule_gamble_tolerance", 25.0, "gamble_tolerance"),
         ("number.wholesale_ev_schedule_min_block_hours", 1.5, "min_block_hours"),
-        ("number.wholesale_ev_schedule_max_block_hours", 3.0, "max_block_hours"),
         ("number.wholesale_ev_schedule_max_price", 12.5, "max_price"),
     ]:
         await hass.services.async_call(

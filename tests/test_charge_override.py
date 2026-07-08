@@ -56,6 +56,9 @@ async def test_force_off_overrides_an_active_charging_slot(hass):
 async def test_force_on_overrides_idle(hass):
     entry = await async_setup_wholesale_entry(hass)
     coordinator = hass.data[DOMAIN][entry.entry_id]
+    # required_hours defaults to DEFAULT_REQUIRED_HOURS (not idle) -- go idle explicitly.
+    await coordinator.async_set_required_hours(0.0)
+    await hass.async_block_till_done()
     assert coordinator.data["state"] == "idle"
 
     await coordinator.async_set_charge_override("force_on")

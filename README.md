@@ -62,36 +62,44 @@ live entities, no reconfiguration needed.
 
 ## Daily use
 
-**Set these day-to-day:**
-- **Ready by** (`datetime`) — when charging needs to be finished by.
+**Set these day-to-day** (both come with defaults so the integration does
+something sensible out of the box — see below):
+- **Ready by** (`datetime`) — when charging needs to be finished by. Defaults
+  to the next 7am, and **auto-rolls forward** to the following 7am once
+  reached — it's a standing daily target, not something you need to reset
+  every day. Set it manually any time you need a different deadline.
 - **Charging hours required** (`number`) — how many hours of charging you
-  need. Set to 0 to go idle.
+  need. Defaults to 12. Set to 0 to go idle.
 
 **Tune scheduling behaviour anytime** (these have sensible defaults, most
 people won't need to touch them):
-- **Gamble tolerance** — how much to trust predicted (not-yet-known) prices
-  vs. discounting them in favour of known rates. Higher = more willing to
-  bet on forecasts.
-- **Minimum block length** — won't schedule a charging session shorter than
-  this, to avoid rapidly switching your charger on and off.
-- **Maximum block length** — caps how long any single continuous charging
-  session can be (0 = no cap). If your cheapest hours are naturally split
-  into separate price dips, this can spread them into multiple smaller
-  sessions instead of one long one.
-- **Maximum price** — won't schedule anything above this average price per
-  session, even if it means missing your target hours.
+- **Gamble tolerance** (default 50%) — how much to trust predicted
+  (not-yet-known) prices vs. discounting them in favour of known rates.
+  Higher = more willing to bet on forecasts.
+- **Minimum block length** (default 4h, 0–24h) — won't schedule a charging
+  session shorter than this, to avoid rapidly switching your charger on and
+  off. Set to 0 for no minimum at all.
+- **Maximum price** (default 20) — won't schedule anything above this
+  average price per session, even if it means missing your target hours.
+  This is a plain number, not currency-aware — it's compared directly
+  against your price data after your configured unit multiplier is applied
+  (e.g. pence/kWh for a typical UK £/kWh source with the default 100×
+  multiplier). Set it to match whatever unit your prices actually end up in.
 
 **Boost, stop, and reset:**
 - **Boost duration** (`number`) — set this to a number of hours to start
   charging immediately for that long, ignoring the schedule. Resets to 0
   automatically once it takes effect.
 - **Cancel boost** (button) — end an active boost early.
-- **Stop** (button) — clear today's schedule and cancel any boost, but
-  **keep** your ready-by time (useful if you've decided not to charge today
-  but the same deadline applies tomorrow).
-- **Reset** (button) — a full reset, clearing the ready-by time as well.
-  Handy to wire to an automation that fires when your charger becomes
-  unplugged, so the next time you plug in you're starting fresh.
+- **Stop** (button) — kills/ends the current session: clears today's
+  schedule and cancels any boost, but **keeps** your ready-by time and every
+  tuning preference untouched (useful if you've decided not to charge today
+  but the same deadline still applies tomorrow).
+- **Reset** (button) — puts everything back to defaults: ready-by, hours
+  required, gamble tolerance, minimum block length, max price, and the
+  charge override, on top of clearing the schedule and any boost like Stop
+  does. Handy to wire to an automation that fires when your charger becomes
+  unplugged, so the next time you plug in you're starting completely fresh.
 
 **Manual override:**
 - **Charge override** (`select`: Auto / Force On / Force Off) — leave on

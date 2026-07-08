@@ -79,10 +79,28 @@ async def test_setup_entry_registers_all_expected_entities(hass):
         assert registered_id == entity_id, f"expected {entity_id}, registry has {registered_id}"
 
 
-async def test_state_sensor_reports_idle_with_no_inputs_set(hass):
-    await async_setup_wholesale_entry(hass)
+async def test_state_sensor_reports_error_on_fresh_setup_with_no_price_data(hass):
+    # required_hours defaults to DEFAULT_REQUIRED_HOURS (not idle) and ready_by
+    # defaults to the next 7am, so a fresh setup with no price entities
+    # configured tries to schedule and finds nothing to work with.
+    entry = await async_setup_wholesale_entry(hass)
+    coordinator = hass.data[DOMAIN][entry.entry_id]
     state = hass.states.get("sensor.wholesale_ev_schedule_charging_state")
     assert state is not None
+    assert state.state == "error"
+    assert coordinator.required_hours == 12.0
+    assert coordinator.ready_by is not None
+    assert coordinator.ready_by.hour == 7
+
+
+async def test_state_sensor_reports_idle_when_required_hours_explicitly_zeroed(hass):
+    entry = await async_setup_wholesale_entry(hass)
+    coordinator = hass.data[DOMAIN][entry.entry_id]
+
+    await coordinator.async_set_required_hours(0.0)
+    await hass.async_block_till_done()
+
+    state = hass.states.get("sensor.wholesale_ev_schedule_charging_state")
     assert state.state == "idle"
 
 

@@ -57,10 +57,14 @@ async def test_min_block_hours_relaxes_when_longer_than_required(hass):
     assert coordinator.data["sessions"]
 
 
-async def test_max_block_hours_splits_a_long_cheap_run(hass):
+async def test_multi_block_scheduling_splits_across_separate_cheap_dips(hass):
+    # There's no max_block_hours knob anymore (see const.py) -- but the
+    # underlying multi-block capability in find_optimal_slots is untouched,
+    # so genuinely separate cheap price dips should still land as separate
+    # blocks rather than always merging into one. min_block_hours=0.5 so the
+    # gap-avoidance floor doesn't force them together.
     entry = await async_setup_wholesale_entry(hass)
     coordinator = hass.data[DOMAIN][entry.entry_id]
-    await coordinator.async_set_max_block_hours(1.0)
     await coordinator.async_set_min_block_hours(0.5)
 
     now = dt_util.now()

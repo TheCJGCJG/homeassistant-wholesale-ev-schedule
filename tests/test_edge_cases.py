@@ -5,7 +5,7 @@ from datetime import timedelta
 
 import homeassistant.util.dt as dt_util
 
-from custom_components.wholesale_ev_schedule.const import DOMAIN
+from custom_components.wholesale_ev_schedule.const import DEFAULT_READY_BY_HOUR, DOMAIN
 
 from .factories import (
     CURRENT_RATES_ENTITY,
@@ -56,16 +56,25 @@ async def test_malformed_forecast_point_is_skipped_not_crashed(hass):
     assert coordinator.data["state"] in ("scheduled", "charging")
 
 
-async def test_ready_by_in_the_past_reports_error(hass):
+async def test_ready_by_in_the_past_rolls_forward_instead_of_erroring(hass):
     entry = await async_setup_wholesale_entry(hass)
     coordinator = hass.data[DOMAIN][entry.entry_id]
 
+    now = dt_util.now()
+    # A full day of cheap data so scheduling succeeds regardless of exactly
+    # how far away the next DEFAULT_READY_BY_HOUR occurrence is from "now".
+    set_octopus_rate_entity(hass, CURRENT_RATES_ENTITY, octopus_rate_points(now, 48, price_gbp_per_kwh=0.05))
+    set_octopus_rate_entity(hass, NEXT_RATES_ENTITY, [])
+
     await coordinator.async_set_required_hours(1.0)
-    await coordinator.async_set_ready_by(dt_util.now() - timedelta(hours=1))
+    await coordinator.async_set_ready_by(now - timedelta(hours=1))  # already in the past
     await hass.async_block_till_done()
 
-    assert coordinator.data["state"] == "error"
-    assert "past" in coordinator.data["error_reason"]
+    # No longer errors — ready_by silently rolls forward to the next
+    # DEFAULT_READY_BY_HOUR occurrence and scheduling proceeds normally.
+    assert coordinator.ready_by > now
+    assert coordinator.ready_by.hour == DEFAULT_READY_BY_HOUR
+    assert coordinator.data["state"] in ("scheduled", "charging")
 
 
 async def test_active_session_survives_a_price_refresh(hass):

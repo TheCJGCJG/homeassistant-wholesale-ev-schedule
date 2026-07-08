@@ -23,10 +23,10 @@ CONF_CURRENT_RATES_ENTITY = "current_rates_entity"
 CONF_NEXT_RATES_ENTITY = "next_rates_entity"
 CONF_FORECAST_ENTITY = "forecast_entity"
 
-# Config / options keys — timing only. Gamble tolerance, min/max block hours,
-# and max price used to live here too, but those are the kind of thing you
-# tweak day-to-day — they're now live `number` entities (see coordinator.py)
-# rather than config-flow options that require a reload to change.
+# Config / options keys — timing only. Gamble tolerance, min block hours, and
+# max price used to live here too, but those are the kind of thing you tweak
+# day-to-day — they're now live `number` entities (see coordinator.py) rather
+# than config-flow options that require a reload to change.
 CONF_UPDATE_INTERVAL_MINUTES = "update_interval_minutes"
 
 # Config / options keys — which named provider (see providers.py) supplies each
@@ -58,12 +58,23 @@ CHARGE_OVERRIDE_FORCE_OFF = "force_off"
 DEFAULT_CHARGE_OVERRIDE = CHARGE_OVERRIDE_AUTO
 
 DEFAULT_GAMBLE_TOLERANCE = 50.0
-DEFAULT_MIN_BLOCK_HOURS = 1.0
-# 0 is the "unlimited" sentinel — no cap on how long a single contiguous
-# charging block may be, matching the pre-existing (pyscript) behaviour.
-DEFAULT_MAX_BLOCK_HOURS = 0.0
+# The only block-length knob — a floor on how short a single charging block
+# may be, to avoid rapidly cycling the charger. 0 means no minimum at all.
+# There's deliberately no separate "max block hours": it only ever capped
+# window *selection* size without guaranteeing an actual rest period (see
+# the find_optimal_slots docstring in scheduler.py), which wasn't worth the
+# extra knob.
+DEFAULT_MIN_BLOCK_HOURS = 4.0
 DEFAULT_MAX_PRICE = 20.0
 DEFAULT_UPDATE_INTERVAL_MINUTES = 5
+DEFAULT_REQUIRED_HOURS = 12.0
+
+# ready_by has no fixed default — it rolls forward automatically. Both on
+# first setup (no stored value yet) and whenever the current ready_by is
+# reached, it's set to the next occurrence of this hour, local time — so
+# "charge N hours by 7am" is a standing target that renews itself daily
+# without needing to be reset manually. See scheduler.next_ready_by.
+DEFAULT_READY_BY_HOUR = 7
 
 DEFAULT_RATE_UNIT_MULTIPLIER = 100.0
 DEFAULT_RATES_ATTRIBUTE = "rates"

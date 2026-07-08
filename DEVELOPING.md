@@ -37,12 +37,22 @@ custom_components/wholesale_ev_schedule/
   charger (a switch, an API call, your own automation) and use the override
   select to force it on/off regardless of the computed schedule. This keeps
   the integration portable across charger brands.
-- **`max_block_hours` caps window *selection* size, not an enforced rest
-  period.** If the single cheapest option in the market genuinely is one long
-  uninterrupted dip, capping the window size still produces one long block —
-  see the docstring on `find_optimal_slots` in `scheduler.py` for the full
-  reasoning, and `tests/test_scheduler.py::test_find_optimal_slots_caps_individual_window_size_with_max_block_hours`
-  for a worked example of what it does and doesn't guarantee.
+- **There's no live `max_block_hours` entity** — it was removed as an
+  unnecessary second knob (it only ever capped window *selection* size
+  without guaranteeing an actual rest period; genuine multi-block scheduling
+  already happens naturally whenever cheap price dips are separated by a
+  pricier period — see `tests/test_tolerances_and_reload.py::test_multi_block_scheduling_splits_across_separate_cheap_dips`).
+  `find_optimal_slots` in `scheduler.py` still *accepts* a `max_block_hours`
+  parameter and is tested with it (`tests/test_scheduler.py`) since it's a
+  reusable, well-understood pure capability — it's just not wired to
+  anything in the coordinator/entity layer right now. Re-add a `number`
+  entity for it if a real need comes up.
+- **`ready_by` has no fixed default and never just "expires".** On first
+  setup, and again every time the current `ready_by` is reached, it's set to
+  the next occurrence of `DEFAULT_READY_BY_HOUR` (`scheduler.next_ready_by`)
+  — see `_async_update_data` in `coordinator.py`. This makes "charge N hours
+  by 7am" a standing daily target instead of something that errors out or
+  needs resetting by hand.
 
 ## Entity naming
 
@@ -80,19 +90,19 @@ All tests run inside Docker (`public.ecr.aws/docker/library/python:trixie`):
 ./run-tests.sh --shell      # interactive shell in the container
 ```
 
-96 tests, 97% branch coverage (100% on `config_flow.py`, `providers.py`,
+101 tests, 97% branch coverage (100% on `config_flow.py`, `providers.py`,
 `button.py`, `select.py`):
-- `tests/test_scheduler.py` — unit tests for the pure scheduling algorithm, including max_block_hours splitting and the price-summary diagnostics
-- `tests/test_integration_smoke.py` — full config/options flow, entity registration
+- `tests/test_scheduler.py` — unit tests for the pure scheduling algorithm, including max_block_hours splitting (the pure capability), next_ready_by, and the price-summary diagnostics
+- `tests/test_integration_smoke.py` — full config/options flow, entity registration, idle vs error state on a fresh setup given the new defaults
 - `tests/test_providers.py` — custom rates/forecast provider branches, "no forecast" branch
 - `tests/test_multi_instance.py` — two instances with distinct names don't collide; duplicate-name/slug is rejected
 - `tests/test_entity_naming.py` — entity_id prefix guarantee, no collision with the pyscript original
 - `tests/test_price_parsing.py` — custom rate/forecast attribute & key names, unit multiplier, missing forecast entity, gamble tolerance
 - `tests/test_charge_override.py` — auto/force-on/force-off, including overriding an active slot or boost, and persistence across restarts
-- `tests/test_tolerances_and_reload.py` — max_price/min_block_hours/max_block_hours enforcement, options-triggered reload picking up a changed update interval
-- `tests/test_boost_stop.py` — boost start/self-reset, boost cancel, stop vs reset, boost_ends_at visibility
+- `tests/test_tolerances_and_reload.py` — max_price/min_block_hours enforcement, genuine multi-block scheduling without a max_block_hours knob, options-triggered reload picking up a changed update interval
+- `tests/test_boost_stop.py` — boost start/self-reset, boost cancel, stop vs reset (reset restores every default), boost_ends_at visibility
 - `tests/test_diagnostics.py` — diagnostic sensors are hidden by default, price-summary diagnostics populate even when idle, block/upcoming-block sensors, live tuning number entities
-- `tests/test_edge_cases.py` — malformed price data, ready_by in the past, active-session persistence across a price refresh, natural boost expiry
+- `tests/test_edge_cases.py` — malformed price data, ready_by rolling forward instead of erroring once passed, active-session persistence across a price refresh, natural boost expiry
 
 ## CI / releases
 

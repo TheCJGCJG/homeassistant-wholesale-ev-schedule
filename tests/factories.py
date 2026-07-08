@@ -90,7 +90,7 @@ _ENTITY_SUFFIXES = {
     "binary_sensor": ["charging_desired"],
     "number": [
         "charging_hours_required", "boost_duration_hours",
-        "gamble_tolerance", "min_block_hours", "max_block_hours", "max_price",
+        "gamble_tolerance", "min_block_hours", "max_price",
     ],
     "datetime": ["ready_by"],
     "select": ["charge_override"],

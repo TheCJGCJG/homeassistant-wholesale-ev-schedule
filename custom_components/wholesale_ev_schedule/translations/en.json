@@ -130,7 +130,6 @@
       "boost_duration_hours": { "name": "Boost duration" },
       "gamble_tolerance": { "name": "Gamble tolerance" },
       "min_block_hours": { "name": "Minimum block length" },
-      "max_block_hours": { "name": "Maximum block length" },
       "max_price": { "name": "Maximum price" }
     },
     "datetime": {
