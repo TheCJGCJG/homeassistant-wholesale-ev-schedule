@@ -3,32 +3,65 @@
     "step": {
       "user": {
         "title": "Set up Wholesale EV Schedule",
-        "description": "Wire up your wholesale price entities and charger sensor. Ready-by time and hours required are set later as live entities.",
+        "description": "Give this instance a unique name if you're setting up more than one (e.g. per car) — it becomes the entity_id prefix. Pick which service supplies your actual and forecast wholesale prices; \"Custom\" lets you point at an unsupported source directly.",
+        "data": {
+          "name": "Name",
+          "charger_state_entity": "Charger work-state sensor",
+          "charger_connected_states": "Charger states meaning \"connected\" (comma separated)",
+          "rates_provider": "Actual rates source",
+          "forecast_provider": "Forecast source"
+        }
+      },
+      "rates_octopus_energy": {
+        "title": "Octopus Energy rates",
+        "description": "Find these under Settings → Devices & services → Octopus Energy on your HA instance.",
+        "data": {
+          "current_rates_entity": "Current-day rates entity",
+          "next_rates_entity": "Next-day rates entity"
+        }
+      },
+      "rates_custom": {
+        "title": "Custom actual-rates source",
+        "description": "Point at any entity exposing an attribute holding a list of rate points, and tell us the key names within each point.",
         "data": {
           "current_rates_entity": "Current-day rates entity",
           "next_rates_entity": "Next-day rates entity",
-          "forecast_entity": "Price forecast entity (optional)",
-          "charger_state_entity": "Charger work-state sensor",
-          "charger_connected_states": "Charger states meaning \"connected\" (comma separated)"
+          "rates_attribute": "Attribute name (list of rate points)",
+          "rate_start_key": "Rate point key: start time",
+          "rate_value_key": "Rate point key: price",
+          "rate_unit_multiplier": "Price multiplier (e.g. 100 to convert £/kWh to p/kWh)"
+        }
+      },
+      "forecast_agile_predict": {
+        "title": "AgilePredict forecast",
+        "description": "The REST sensor entity you created pointing at https://agilepredict.com/api/{region} (see agilepredict.com/v2/api_how_to for the HA sensor snippet).",
+        "data": {
+          "forecast_entity": "Forecast entity"
+        }
+      },
+      "forecast_custom": {
+        "title": "Custom forecast source",
+        "description": "Point at any entity exposing an attribute holding a list of forecast points, and tell us the key names within each point.",
+        "data": {
+          "forecast_entity": "Forecast entity",
+          "forecast_attribute": "Attribute name (list of forecast points)",
+          "forecast_datetime_key": "Forecast point key: date/time",
+          "forecast_price_key": "Forecast point key: price",
+          "forecast_unit_multiplier": "Price multiplier (1 if already in the same unit as your actual rates)"
         }
       },
       "advanced": {
-        "title": "Scheduling tolerances and price parsing",
-        "description": "The parsing fields only need changing if your price entities aren't shaped like Octopus Energy's — e.g. a different wholesale price integration.",
+        "title": "Scheduling tolerances",
         "data": {
           "gamble_tolerance": "Gamble tolerance",
           "min_block_hours": "Minimum charging block length",
           "max_price": "Maximum average price per session",
-          "update_interval_minutes": "Re-evaluate every (minutes)",
-          "rate_unit_multiplier": "Rate value multiplier (e.g. 100 to convert £/kWh to p/kWh)",
-          "rates_attribute": "Rate entity attribute name (list of rate points)",
-          "rate_start_key": "Rate point key: start time",
-          "rate_value_key": "Rate point key: price",
-          "forecast_attribute": "Forecast entity attribute name (list of forecast points)",
-          "forecast_datetime_key": "Forecast point key: date/time",
-          "forecast_price_key": "Forecast point key: price"
+          "update_interval_minutes": "Re-evaluate every (minutes)"
         }
       }
+    },
+    "abort": {
+      "already_configured": "An instance with this name (or its slugified entity_id prefix) is already configured. Choose a different name."
     }
   },
   "options": {
@@ -36,27 +69,53 @@
       "init": {
         "title": "Wholesale EV Schedule: entity wiring",
         "data": {
+          "charger_state_entity": "Charger work-state sensor",
+          "charger_connected_states": "Charger states meaning \"connected\" (comma separated)",
+          "rates_provider": "Actual rates source",
+          "forecast_provider": "Forecast source"
+        }
+      },
+      "rates_octopus_energy": {
+        "title": "Octopus Energy rates",
+        "data": {
+          "current_rates_entity": "Current-day rates entity",
+          "next_rates_entity": "Next-day rates entity"
+        }
+      },
+      "rates_custom": {
+        "title": "Custom actual-rates source",
+        "data": {
           "current_rates_entity": "Current-day rates entity",
           "next_rates_entity": "Next-day rates entity",
-          "forecast_entity": "Price forecast entity (optional)",
-          "charger_state_entity": "Charger work-state sensor",
-          "charger_connected_states": "Charger states meaning \"connected\" (comma separated)"
+          "rates_attribute": "Attribute name (list of rate points)",
+          "rate_start_key": "Rate point key: start time",
+          "rate_value_key": "Rate point key: price",
+          "rate_unit_multiplier": "Price multiplier (e.g. 100 to convert £/kWh to p/kWh)"
+        }
+      },
+      "forecast_agile_predict": {
+        "title": "AgilePredict forecast",
+        "data": {
+          "forecast_entity": "Forecast entity"
+        }
+      },
+      "forecast_custom": {
+        "title": "Custom forecast source",
+        "data": {
+          "forecast_entity": "Forecast entity",
+          "forecast_attribute": "Attribute name (list of forecast points)",
+          "forecast_datetime_key": "Forecast point key: date/time",
+          "forecast_price_key": "Forecast point key: price",
+          "forecast_unit_multiplier": "Price multiplier (1 if already in the same unit as your actual rates)"
         }
       },
       "advanced": {
-        "title": "Scheduling tolerances and price parsing",
+        "title": "Scheduling tolerances",
         "data": {
           "gamble_tolerance": "Gamble tolerance",
           "min_block_hours": "Minimum charging block length",
           "max_price": "Maximum average price per session",
-          "update_interval_minutes": "Re-evaluate every (minutes)",
-          "rate_unit_multiplier": "Rate value multiplier (e.g. 100 to convert £/kWh to p/kWh)",
-          "rates_attribute": "Rate entity attribute name (list of rate points)",
-          "rate_start_key": "Rate point key: start time",
-          "rate_value_key": "Rate point key: price",
-          "forecast_attribute": "Forecast entity attribute name (list of forecast points)",
-          "forecast_datetime_key": "Forecast point key: date/time",
-          "forecast_price_key": "Forecast point key: price"
+          "update_interval_minutes": "Re-evaluate every (minutes)"
         }
       }
     }

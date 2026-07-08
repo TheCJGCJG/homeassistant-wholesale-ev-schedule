@@ -153,6 +153,80 @@ def test_find_optimal_slots_returns_empty_for_zero_required():
     assert find_optimal_slots(slots, 0, NOW + timedelta(hours=5), 1.0) == []
 
 
+def _priced_slot(dt, price):
+    return {"date_time": dt, "raw_price": price, "source": "current_actual"}
+
+
+def test_find_optimal_slots_skips_overlap_then_fills_via_relaxed_fallback():
+    # A 4-slot run priced [5, 1, 1, 5]: the cheap middle pair (avg=1) is the
+    # best 2-slot window and gets picked first, leaving 2 slots still needed.
+    # Every remaining window is then rejected — the 3- and 4-slot windows are
+    # now too large for what's left (`if w['size'] > remaining: continue`),
+    # and the other 2-slot windows overlap the selection (`if w['dts'] &
+    # selected_dts: continue`) — so the run is exhausted without filling the
+    # full 4-slot requirement, forcing the relaxed fallback to top up the
+    # remainder with the two leftover (pricier) slots.
+    run = [
+        _priced_slot(NOW, 5.0),
+        _priced_slot(NOW + timedelta(minutes=30), 1.0),
+        _priced_slot(NOW + timedelta(hours=1), 1.0),
+        _priced_slot(NOW + timedelta(hours=1, minutes=30), 5.0),
+    ]
+    slots = assign_credibilities(run, NOW, gamble_tolerance=100.0)
+
+    result = find_optimal_slots(
+        slots, required_slots=4, ready_by_dt=NOW + timedelta(hours=5), min_block_hours=1.0
+    )
+
+    assert {s["date_time"] for s in result} == {s["date_time"] for s in run}
+
+
+def test_find_optimal_slots_skips_windows_that_would_leave_an_unfillable_gap():
+    # A 3-slot run, all tied at the same price, with min_block=1h (2 slots).
+    # Either 2-slot sub-window would leave a 1-slot remainder — smaller than
+    # the minimum block — so both must be skipped (`if after > 0 and after <
+    # min_slots_per_block: continue`) in favour of the single 3-slot window
+    # that exactly satisfies the requirement in one block.
+    run = make_slots(NOW, 3, price=1.0)
+    slots = assign_credibilities(run, NOW, gamble_tolerance=100.0)
+
+    result = find_optimal_slots(
+        slots, required_slots=3, ready_by_dt=NOW + timedelta(hours=5), min_block_hours=1.0
+    )
+
+    assert len(result) == 3
+    assert build_contiguous_runs(sorted(result, key=lambda s: s["date_time"])) == [
+        sorted(result, key=lambda s: s["date_time"])
+    ]
+
+
+def test_find_optimal_slots_skips_a_window_too_large_for_the_remaining_need():
+    # Run A (2 slots @ 1p) is cheapest and gets picked first, leaving 2 slots
+    # still needed. Run B (3 slots @ 1p/5p/1p) has a 3-slot window whose
+    # average (2.33p) beats its own 2-slot sub-windows (3p each) and so sorts
+    # next — but its size (3) now exceeds what's left to fill (2), so it must
+    # be skipped (`if w['size'] > remaining: continue`) in favour of the
+    # cheapest 2-slot sub-window that actually fits.
+    run_a = [_priced_slot(NOW, 1.0), _priced_slot(NOW + timedelta(minutes=30), 1.0)]
+    run_b_start = NOW + timedelta(hours=5)
+    run_b = [
+        _priced_slot(run_b_start, 1.0),
+        _priced_slot(run_b_start + timedelta(minutes=30), 5.0),
+        _priced_slot(run_b_start + timedelta(hours=1), 1.0),
+    ]
+    slots = assign_credibilities(run_a + run_b, NOW, gamble_tolerance=100.0)
+
+    result = find_optimal_slots(
+        slots, required_slots=4, ready_by_dt=NOW + timedelta(hours=10), min_block_hours=1.0
+    )
+
+    result_dts = {s["date_time"] for s in result}
+    assert result_dts == {run_a[0]["date_time"], run_a[1]["date_time"], run_b[0]["date_time"], run_b[1]["date_time"]}
+    # The expensive middle slot of run_b, only reachable via the too-large
+    # 3-slot window, must NOT be in the result.
+    assert run_b[2]["date_time"] not in result_dts
+
+
 def test_slots_to_sessions_groups_contiguous_runs():
     run1 = make_slots(NOW, 2, price=10.0)
     run2 = make_slots(NOW + timedelta(hours=3), 2, price=20.0)

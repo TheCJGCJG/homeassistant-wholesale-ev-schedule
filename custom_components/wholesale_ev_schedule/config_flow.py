@@ -1,9 +1,10 @@
 """Config flow for Wholesale EV Schedule.
 
-Split into two steps so the form isn't overwhelming: "user"/"init" wires up the
-entities that must exist for the integration to do anything, "advanced" holds
-the scheduling tolerances and the price-entity parsing overrides that let this
-point at wholesale price sources other than Octopus Energy's event-entity shape.
+Steps: user/init (name + charger + pick a rates/forecast provider) -> a
+provider-specific rates step -> a provider-specific forecast step (or none) ->
+advanced (scheduling tolerances). Picking a named provider (see providers.py)
+fills in its attribute/key shape automatically; picking "custom" asks for it
+directly, so an unmodelled wholesale price source can still be wired up.
 """
 from __future__ import annotations
 
@@ -12,8 +13,10 @@ from typing import Any
 import voluptuous as vol
 
 from homeassistant.config_entries import ConfigEntry, ConfigFlow, OptionsFlow
+from homeassistant.const import CONF_NAME
 from homeassistant.core import callback
 from homeassistant.helpers import selector
+from homeassistant.util import slugify
 
 from .const import (
     CONF_CHARGER_CONNECTED_STATES,
@@ -23,6 +26,8 @@ from .const import (
     CONF_FORECAST_DATETIME_KEY,
     CONF_FORECAST_ENTITY,
     CONF_FORECAST_PRICE_KEY,
+    CONF_FORECAST_PROVIDER,
+    CONF_FORECAST_UNIT_MULTIPLIER,
     CONF_GAMBLE_TOLERANCE,
     CONF_MAX_PRICE,
     CONF_MIN_BLOCK_HOURS,
@@ -31,20 +36,25 @@ from .const import (
     CONF_RATE_UNIT_MULTIPLIER,
     CONF_RATE_VALUE_KEY,
     CONF_RATES_ATTRIBUTE,
+    CONF_RATES_PROVIDER,
     CONF_UPDATE_INTERVAL_MINUTES,
     DEFAULT_CHARGER_CONNECTED_STATES,
-    DEFAULT_FORECAST_ATTRIBUTE,
-    DEFAULT_FORECAST_DATETIME_KEY,
-    DEFAULT_FORECAST_PRICE_KEY,
     DEFAULT_GAMBLE_TOLERANCE,
     DEFAULT_MAX_PRICE,
     DEFAULT_MIN_BLOCK_HOURS,
-    DEFAULT_RATE_START_KEY,
+    DEFAULT_NAME,
     DEFAULT_RATE_UNIT_MULTIPLIER,
-    DEFAULT_RATE_VALUE_KEY,
-    DEFAULT_RATES_ATTRIBUTE,
     DEFAULT_UPDATE_INTERVAL_MINUTES,
     DOMAIN,
+)
+from .providers import (
+    FORECAST_PROVIDER_AGILE_PREDICT,
+    FORECAST_PROVIDER_CUSTOM,
+    FORECAST_PROVIDER_NONE,
+    FORECAST_PROVIDERS,
+    RATE_PROVIDER_CUSTOM,
+    RATE_PROVIDER_OCTOPUS_ENERGY,
+    RATE_PROVIDERS,
 )
 
 
@@ -57,17 +67,40 @@ def _required(key: str, defaults: dict[str, Any]) -> vol.Required:
     return vol.Required(key)
 
 
-def _optional(key: str, defaults: dict[str, Any]) -> vol.Optional:
-    if key in defaults and defaults[key] is not None:
-        return vol.Optional(key, default=defaults[key])
-    return vol.Optional(key)
-
-
 def _with_default(key: str, defaults: dict[str, Any], fallback: Any) -> vol.Required:
     return vol.Required(key, default=defaults.get(key, fallback))
 
 
-def essential_schema(defaults: dict[str, Any]) -> vol.Schema:
+def _provider_select(options: dict[str, dict]) -> selector.SelectSelector:
+    return selector.SelectSelector(selector.SelectSelectorConfig(
+        options=[selector.SelectOptionDict(value=k, label=v["label"]) for k, v in options.items()],
+        mode=selector.SelectSelectorMode.DROPDOWN,
+    ))
+
+
+def base_schema(defaults: dict[str, Any], include_name: bool) -> vol.Schema:
+    schema: dict[Any, Any] = {}
+    if include_name:
+        # Slugified into the entity_id prefix (e.g. "Tesla EV Schedule" ->
+        # entities named number.tesla_ev_schedule_*) so multiple instances of
+        # this integration can run side by side without colliding.
+        schema[vol.Required(CONF_NAME, default=defaults.get(CONF_NAME, DEFAULT_NAME))] = str
+    schema.update({
+        _required(CONF_CHARGER_STATE_ENTITY, defaults): selector.EntitySelector(
+            selector.EntitySelectorConfig(domain="sensor")
+        ),
+        _with_default(
+            CONF_CHARGER_CONNECTED_STATES, defaults, DEFAULT_CHARGER_CONNECTED_STATES
+        ): str,
+        _with_default(CONF_RATES_PROVIDER, defaults, RATE_PROVIDER_OCTOPUS_ENERGY): _provider_select(RATE_PROVIDERS),
+        _with_default(
+            CONF_FORECAST_PROVIDER, defaults, FORECAST_PROVIDER_AGILE_PREDICT
+        ): _provider_select(FORECAST_PROVIDERS),
+    })
+    return vol.Schema(schema)
+
+
+def rates_octopus_energy_schema(defaults: dict[str, Any]) -> vol.Schema:
     return vol.Schema({
         _required(CONF_CURRENT_RATES_ENTITY, defaults): selector.EntitySelector(
             selector.EntitySelectorConfig(domain="event")
@@ -75,15 +108,47 @@ def essential_schema(defaults: dict[str, Any]) -> vol.Schema:
         _required(CONF_NEXT_RATES_ENTITY, defaults): selector.EntitySelector(
             selector.EntitySelectorConfig(domain="event")
         ),
-        _optional(CONF_FORECAST_ENTITY, defaults): selector.EntitySelector(
-            selector.EntitySelectorConfig(domain="sensor")
+    })
+
+
+def rates_custom_schema(defaults: dict[str, Any]) -> vol.Schema:
+    return vol.Schema({
+        _required(CONF_CURRENT_RATES_ENTITY, defaults): selector.EntitySelector(
+            selector.EntitySelectorConfig(domain="event")
         ),
-        _required(CONF_CHARGER_STATE_ENTITY, defaults): selector.EntitySelector(
-            selector.EntitySelectorConfig(domain="sensor")
+        _required(CONF_NEXT_RATES_ENTITY, defaults): selector.EntitySelector(
+            selector.EntitySelectorConfig(domain="event")
         ),
+        _with_default(CONF_RATES_ATTRIBUTE, defaults, "rates"): str,
+        _with_default(CONF_RATE_START_KEY, defaults, "start"): str,
+        _with_default(CONF_RATE_VALUE_KEY, defaults, "value_inc_vat"): str,
         _with_default(
-            CONF_CHARGER_CONNECTED_STATES, defaults, DEFAULT_CHARGER_CONNECTED_STATES
-        ): str,
+            CONF_RATE_UNIT_MULTIPLIER, defaults, DEFAULT_RATE_UNIT_MULTIPLIER
+        ): selector.NumberSelector(
+            selector.NumberSelectorConfig(min=0.01, max=1000, step=0.01, mode=selector.NumberSelectorMode.BOX)
+        ),
+    })
+
+
+def forecast_agile_predict_schema(defaults: dict[str, Any]) -> vol.Schema:
+    return vol.Schema({
+        _required(CONF_FORECAST_ENTITY, defaults): selector.EntitySelector(
+            selector.EntitySelectorConfig(domain="sensor")
+        ),
+    })
+
+
+def forecast_custom_schema(defaults: dict[str, Any]) -> vol.Schema:
+    return vol.Schema({
+        _required(CONF_FORECAST_ENTITY, defaults): selector.EntitySelector(
+            selector.EntitySelectorConfig(domain="sensor")
+        ),
+        _with_default(CONF_FORECAST_ATTRIBUTE, defaults, "prices"): str,
+        _with_default(CONF_FORECAST_DATETIME_KEY, defaults, "date_time"): str,
+        _with_default(CONF_FORECAST_PRICE_KEY, defaults, "agile_pred"): str,
+        _with_default(CONF_FORECAST_UNIT_MULTIPLIER, defaults, 1.0): selector.NumberSelector(
+            selector.NumberSelectorConfig(min=0.01, max=1000, step=0.01, mode=selector.NumberSelectorMode.BOX)
+        ),
     })
 
 
@@ -103,42 +168,115 @@ def advanced_schema(defaults: dict[str, Any]) -> vol.Schema:
         ): selector.NumberSelector(
             selector.NumberSelectorConfig(min=1, max=60, step=1, mode=selector.NumberSelectorMode.BOX)
         ),
-        _with_default(
-            CONF_RATE_UNIT_MULTIPLIER, defaults, DEFAULT_RATE_UNIT_MULTIPLIER
-        ): selector.NumberSelector(
-            selector.NumberSelectorConfig(min=0.01, max=1000, step=0.01, mode=selector.NumberSelectorMode.BOX)
-        ),
-        _with_default(CONF_RATES_ATTRIBUTE, defaults, DEFAULT_RATES_ATTRIBUTE): str,
-        _with_default(CONF_RATE_START_KEY, defaults, DEFAULT_RATE_START_KEY): str,
-        _with_default(CONF_RATE_VALUE_KEY, defaults, DEFAULT_RATE_VALUE_KEY): str,
-        _with_default(CONF_FORECAST_ATTRIBUTE, defaults, DEFAULT_FORECAST_ATTRIBUTE): str,
-        _with_default(CONF_FORECAST_DATETIME_KEY, defaults, DEFAULT_FORECAST_DATETIME_KEY): str,
-        _with_default(CONF_FORECAST_PRICE_KEY, defaults, DEFAULT_FORECAST_PRICE_KEY): str,
     })
 
 
-class WholesaleEvScheduleConfigFlow(ConfigFlow, domain=DOMAIN):
+class _ProviderStepsMixin:
+    """Steps shared by the initial config flow and the options flow, from the
+    rates-provider branch through to the final scheduling-tolerances step.
+    Subclasses implement `_async_finish` to actually create/update the entry.
+    """
+
+    def _provider_state(self) -> dict[str, Any]:
+        if not hasattr(self, "_provider_options"):
+            self._provider_options: dict[str, Any] = {}
+        return self._provider_options
+
+    async def _async_after_base_step(self, base_options: dict[str, Any]):
+        state = self._provider_state()
+        state.update(base_options)
+        if state[CONF_RATES_PROVIDER] == RATE_PROVIDER_CUSTOM:
+            return await self.async_step_rates_custom()
+        return await self.async_step_rates_octopus_energy()
+
+    async def async_step_rates_octopus_energy(self, user_input: dict[str, Any] | None = None):
+        state = self._provider_state()
+        if user_input is not None:
+            profile = RATE_PROVIDERS[RATE_PROVIDER_OCTOPUS_ENERGY]
+            state.update(user_input)
+            state[CONF_RATES_ATTRIBUTE] = profile["attribute"]
+            state[CONF_RATE_START_KEY] = profile["start_key"]
+            state[CONF_RATE_VALUE_KEY] = profile["value_key"]
+            state[CONF_RATE_UNIT_MULTIPLIER] = profile["unit_multiplier"]
+            return await self._async_after_rates_step()
+
+        return self.async_show_form(
+            step_id="rates_octopus_energy", data_schema=rates_octopus_energy_schema(state)
+        )
+
+    async def async_step_rates_custom(self, user_input: dict[str, Any] | None = None):
+        state = self._provider_state()
+        if user_input is not None:
+            state.update(user_input)
+            return await self._async_after_rates_step()
+
+        return self.async_show_form(step_id="rates_custom", data_schema=rates_custom_schema(state))
+
+    async def _async_after_rates_step(self):
+        state = self._provider_state()
+        forecast_provider = state[CONF_FORECAST_PROVIDER]
+        if forecast_provider == FORECAST_PROVIDER_NONE:
+            state[CONF_FORECAST_ENTITY] = None
+            return await self.async_step_advanced()
+        if forecast_provider == FORECAST_PROVIDER_CUSTOM:
+            return await self.async_step_forecast_custom()
+        return await self.async_step_forecast_agile_predict()
+
+    async def async_step_forecast_agile_predict(self, user_input: dict[str, Any] | None = None):
+        state = self._provider_state()
+        if user_input is not None:
+            profile = FORECAST_PROVIDERS[FORECAST_PROVIDER_AGILE_PREDICT]
+            state.update(user_input)
+            state[CONF_FORECAST_ATTRIBUTE] = profile["attribute"]
+            state[CONF_FORECAST_DATETIME_KEY] = profile["datetime_key"]
+            state[CONF_FORECAST_PRICE_KEY] = profile["price_key"]
+            state[CONF_FORECAST_UNIT_MULTIPLIER] = profile["unit_multiplier"]
+            return await self.async_step_advanced()
+
+        return self.async_show_form(
+            step_id="forecast_agile_predict", data_schema=forecast_agile_predict_schema(state)
+        )
+
+    async def async_step_forecast_custom(self, user_input: dict[str, Any] | None = None):
+        state = self._provider_state()
+        if user_input is not None:
+            state.update(user_input)
+            return await self.async_step_advanced()
+
+        return self.async_show_form(step_id="forecast_custom", data_schema=forecast_custom_schema(state))
+
+    async def async_step_advanced(self, user_input: dict[str, Any] | None = None):
+        state = self._provider_state()
+        if user_input is not None:
+            state.update(user_input)
+            return await self._async_finish(state)
+
+        return self.async_show_form(step_id="advanced", data_schema=advanced_schema(state))
+
+
+class WholesaleEvScheduleConfigFlow(_ProviderStepsMixin, ConfigFlow, domain=DOMAIN):
     """Handle initial setup of the integration."""
 
     VERSION = 1
 
     def __init__(self) -> None:
-        self._essential: dict[str, Any] = {}
+        self._name: str = DEFAULT_NAME
 
     async def async_step_user(self, user_input: dict[str, Any] | None = None):
         if user_input is not None:
-            self._essential = user_input
-            return await self.async_step_advanced()
+            name = user_input.pop(CONF_NAME)
+            # The slugified name becomes the entity_id prefix — enforce
+            # uniqueness so two instances can never collide on entity_ids.
+            await self.async_set_unique_id(slugify(name))
+            self._abort_if_unique_id_configured()
 
-        return self.async_show_form(step_id="user", data_schema=essential_schema({}))
+            self._name = name
+            return await self._async_after_base_step(user_input)
 
-    async def async_step_advanced(self, user_input: dict[str, Any] | None = None):
-        if user_input is not None:
-            return self.async_create_entry(
-                title="Wholesale EV Schedule", data={}, options={**self._essential, **user_input}
-            )
+        return self.async_show_form(step_id="user", data_schema=base_schema({}, include_name=True))
 
-        return self.async_show_form(step_id="advanced", data_schema=advanced_schema({}))
+    async def _async_finish(self, options: dict[str, Any]):
+        return self.async_create_entry(title=self._name, data={CONF_NAME: self._name}, options=options)
 
     @staticmethod
     @callback
@@ -146,25 +284,18 @@ class WholesaleEvScheduleConfigFlow(ConfigFlow, domain=DOMAIN):
         return WholesaleEvScheduleOptionsFlow()
 
 
-class WholesaleEvScheduleOptionsFlow(OptionsFlow):
-    """Edit the entity wiring, tolerances, and parsing overrides after setup."""
-
-    def __init__(self) -> None:
-        self._essential: dict[str, Any] = {}
+class WholesaleEvScheduleOptionsFlow(_ProviderStepsMixin, OptionsFlow):
+    """Edit the entity wiring, provider choice, and tolerances after setup."""
 
     async def async_step_init(self, user_input: dict[str, Any] | None = None):
+        state = self._provider_state()
+        if not state:
+            state.update(dict(self.config_entry.options))
+
         if user_input is not None:
-            self._essential = user_input
-            return await self.async_step_advanced()
+            return await self._async_after_base_step(user_input)
 
-        return self.async_show_form(
-            step_id="init", data_schema=essential_schema(dict(self.config_entry.options))
-        )
+        return self.async_show_form(step_id="init", data_schema=base_schema(state, include_name=False))
 
-    async def async_step_advanced(self, user_input: dict[str, Any] | None = None):
-        if user_input is not None:
-            return self.async_create_entry(title="", data={**self._essential, **user_input})
-
-        return self.async_show_form(
-            step_id="advanced", data_schema=advanced_schema(dict(self.config_entry.options))
-        )
+    async def _async_finish(self, options: dict[str, Any]):
+        return self.async_create_entry(title="", data=options)

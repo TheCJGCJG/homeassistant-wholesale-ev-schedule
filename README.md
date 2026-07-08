@@ -3,9 +3,10 @@
 > **⚠️ Not ready for use.** This is a work-in-progress port and has not been
 > run against a live Home Assistant instance or real price/charger entities —
 > only against the automated test suite described below. Do not install this
-> on a production HA setup yet. Boost mode, the stop button, and the
-> configurable price-parsing options are implemented but unverified in
-> practice. Treat this repo as a draft until this notice is removed.
+> on a production HA setup yet. Boost mode, the stop button, multi-instance
+> support, and the provider-based price parsing are implemented but
+> unverified in practice. Treat this repo as a draft until this notice is
+> removed.
 
 A Home Assistant custom integration that schedules EV charging across the
 cheapest wholesale price windows. Ported from the scheduling algorithm in
@@ -14,10 +15,12 @@ into a proper integration with a config flow for its inputs and `sensor`/
 `binary_sensor`/`number`/`datetime`/`button` entities for its outputs, instead
 of pyscript + `input_*` helpers.
 
-Designed to run **alongside** an existing pyscript-based (or any other)
-EV-charging setup on the same HA instance: every entity_id this integration
-creates is forced to start with `wholesale_ev_schedule_` (see "Entity naming"
-below), so it can never collide with another integration's entities.
+Supports **multiple instances** side by side (e.g. one per car) and is
+designed to run **alongside** an existing pyscript-based (or any other)
+EV-charging setup on the same HA instance: every entity_id an instance
+creates is forced to start with a prefix derived from that instance's name
+(see "Entity naming" below), so instances — and integrations — can never
+collide on entity_ids.
 
 ## Structure
 
@@ -25,8 +28,9 @@ below), so it can never collide with another integration's entities.
 custom_components/wholesale_ev_schedule/
   scheduler.py      pure scheduling algorithm, no HA dependency
   coordinator.py    reads price/charger entities, runs scheduler.py, persists state
-  config_flow.py    two-step setup + options: entity wiring, then tolerances/parsing
-  entity.py         shared base — forces the wholesale_ev_schedule_ entity_id prefix
+  providers.py      registry of known price-source shapes (Octopus Energy, AgilePredict)
+  config_flow.py    multi-step setup + options: name, providers, then tolerances
+  entity.py         shared base — forces the <prefix>_ entity_id namespace
   sensor.py         state, schedule, next-slot, hours-remaining outputs
   binary_sensor.py  charging_desired output
   number.py         charging_hours_required, boost_duration_hours — live inputs
@@ -36,43 +40,55 @@ custom_components/wholesale_ev_schedule/
 
 ## Configuration
 
-The config flow (and its matching **Configure** options flow) has two steps:
+The config flow (and its matching **Configure** options flow) walks through:
 
-**Step 1 — entity wiring:** current-day rates entity, next-day rates entity,
-optional price forecast entity, charger work-state sensor, and the charger
-states that mean "connected".
+1. **Name + charger + providers** — a name for this instance (becomes the
+   entity_id prefix; give each instance a distinct one if running more than
+   one), the charger work-state sensor and its "connected" states, and which
+   named provider supplies your actual and forecast wholesale prices.
+2. **Rates step** (shape depends on the provider chosen in step 1):
+   - *Octopus Energy* — just the current-day and next-day rates event entities.
+   - *Custom* — the same two entities, plus the attribute/key names and a unit
+     multiplier, for a source not modelled in `providers.py`.
+3. **Forecast step** (skipped entirely if you pick "None"):
+   - *AgilePredict* ([agilepredict.com](https://agilepredict.com/v2/api_how_to/)) — just the forecast entity.
+   - *Custom* — the forecast entity plus attribute/key names and a unit multiplier.
+4. **Scheduling tolerances** — gamble tolerance, min block hours, max price,
+   and how often to re-evaluate (minutes).
 
-**Step 2 — tolerances and price parsing:** gamble tolerance, min block hours,
-max price, how often to re-evaluate (minutes), and the price-entity parsing
-overrides (attribute/key names + a unit multiplier) needed to point this at a
-wholesale price source shaped differently than Octopus Energy's event
-entities — Amber, Nordpool, a template sensor, etc.
+Adding support for another price source (Amber, Nordpool, ...) means adding
+one entry to `providers.py` plus one config_flow step that mirrors the
+existing `rates_octopus_energy` / `forecast_agile_predict` ones — "Custom"
+already covers any source in the meantime.
 
 **Set daily (entities created by the integration):**
-- `datetime.wholesale_ev_schedule_ready_by` — when charging must be complete by
-- `number.wholesale_ev_schedule_charging_hours_required` — hours needed; 0 = idle
+- `datetime.<prefix>_ready_by` — when charging must be complete by
+- `number.<prefix>_charging_hours_required` — hours needed; 0 = idle
 
 **Boost / stop:**
-- `number.wholesale_ev_schedule_boost_duration_hours` — set > 0 to start an
-  immediate boost for that many hours; resets to 0 once registered
-- `button.wholesale_ev_schedule_boost_cancel` — cancel an active boost early
-- `button.wholesale_ev_schedule_stop` — clear the whole schedule and any boost
+- `number.<prefix>_boost_duration_hours` — set > 0 to start an immediate
+  boost for that many hours; resets to 0 once registered
+- `button.<prefix>_boost_cancel` — cancel an active boost early
+- `button.<prefix>_stop` — clear the whole schedule and any boost
 
 ## Outputs
 
-- `sensor.wholesale_ev_schedule_charging_state` — idle / scheduled / charging / boosting / complete / unschedulable / error
-- `sensor.wholesale_ev_schedule_charging_schedule` — `slots` attribute holds the full session list
-- `sensor.wholesale_ev_schedule_next_slot_start` / `_next_slot_end`
-- `sensor.wholesale_ev_schedule_hours_remaining`
-- `binary_sensor.wholesale_ev_schedule_charging_desired` — drive your charger switch from this
+- `sensor.<prefix>_charging_state` — idle / scheduled / charging / boosting / complete / unschedulable / error
+- `sensor.<prefix>_charging_schedule` — `slots` attribute holds the full session list
+- `sensor.<prefix>_next_slot_start` / `_next_slot_end`
+- `sensor.<prefix>_hours_remaining`
+- `binary_sensor.<prefix>_charging_desired` — drive your charger switch from this
 
 ## Entity naming
 
 `entity.py` sets each entity's `entity_id` explicitly (rather than letting HA
-derive it from the friendly name) to `<platform>.wholesale_ev_schedule_<suffix>`,
-guaranteed regardless of translation loading or naming collisions. `tests/test_entity_naming.py`
-asserts every entity_id carries this prefix and that none collide with the
-original pyscript's entity_ids (`sensor.ev_charging_state`, etc).
+derive it from the friendly name) to `<platform>.<prefix>_<suffix>`, where
+`prefix` is the slugified instance name chosen during setup (defaults to
+`wholesale_ev_schedule` — see `const.DEFAULT_NAME`). The config flow enforces
+uniqueness on that slug via the entry's `unique_id`, so two instances can
+never end up sharing a prefix. `tests/test_entity_naming.py` and
+`tests/test_multi_instance.py` cover both the prefix guarantee and the
+no-collision-with-the-pyscript-original guarantee.
 
 ## Testing
 
@@ -84,9 +100,11 @@ All tests run inside Docker (`public.ecr.aws/docker/library/python:trixie`):
 ./run-tests.sh --shell      # interactive shell in the container
 ```
 
-63 tests, 97% coverage:
+70 tests, 97% coverage (100% on `config_flow.py` and `providers.py`):
 - `tests/test_scheduler.py` — unit tests for the pure scheduling algorithm
-- `tests/test_integration_smoke.py` — two-step config/options flow, entity registration
+- `tests/test_integration_smoke.py` — full config/options flow, entity registration
+- `tests/test_providers.py` — custom rates/forecast provider branches, "no forecast" branch
+- `tests/test_multi_instance.py` — two instances with distinct names don't collide; duplicate-name/slug is rejected
 - `tests/test_entity_naming.py` — entity_id prefix guarantee, no collision with the pyscript original
 - `tests/test_price_parsing.py` — custom rate/forecast attribute & key names, unit multiplier, missing forecast entity, gamble tolerance, custom charger-connected states
 - `tests/test_tolerances_and_reload.py` — max_price/min_block_hours enforcement, options-triggered reload picking up a changed update interval

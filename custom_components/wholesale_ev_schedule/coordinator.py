@@ -6,9 +6,11 @@ import logging
 import math
 
 from homeassistant.config_entries import ConfigEntry
+from homeassistant.const import CONF_NAME
 from homeassistant.core import HomeAssistant
 from homeassistant.helpers.storage import Store
 from homeassistant.helpers.update_coordinator import DataUpdateCoordinator
+from homeassistant.util import slugify
 import homeassistant.util.dt as dt_util
 
 from .const import (
@@ -19,6 +21,7 @@ from .const import (
     CONF_FORECAST_DATETIME_KEY,
     CONF_FORECAST_ENTITY,
     CONF_FORECAST_PRICE_KEY,
+    CONF_FORECAST_UNIT_MULTIPLIER,
     CONF_GAMBLE_TOLERANCE,
     CONF_MAX_PRICE,
     CONF_MIN_BLOCK_HOURS,
@@ -31,9 +34,11 @@ from .const import (
     DEFAULT_FORECAST_ATTRIBUTE,
     DEFAULT_FORECAST_DATETIME_KEY,
     DEFAULT_FORECAST_PRICE_KEY,
+    DEFAULT_FORECAST_UNIT_MULTIPLIER,
     DEFAULT_GAMBLE_TOLERANCE,
     DEFAULT_MAX_PRICE,
     DEFAULT_MIN_BLOCK_HOURS,
+    DEFAULT_NAME,
     DEFAULT_RATE_START_KEY,
     DEFAULT_RATE_UNIT_MULTIPLIER,
     DEFAULT_RATE_VALUE_KEY,
@@ -74,7 +79,7 @@ class WholesaleEvScheduleCoordinator(DataUpdateCoordinator[dict]):
         super().__init__(
             hass,
             _LOGGER,
-            name=DOMAIN,
+            name=f"{DOMAIN}_{entry.entry_id}",
             update_interval=timedelta(minutes=update_minutes),
         )
         self.entry = entry
@@ -85,6 +90,17 @@ class WholesaleEvScheduleCoordinator(DataUpdateCoordinator[dict]):
 
         self._stored_sessions: list[dict] = []
         self._boost_end: datetime | None = None
+
+    @property
+    def instance_name(self) -> str:
+        return self.entry.data.get(CONF_NAME, DEFAULT_NAME)
+
+    @property
+    def entity_prefix(self) -> str:
+        """Slugified instance name — the entity_id prefix for this config entry.
+        Uniqueness across instances is enforced at config-flow time via the
+        entry's unique_id, so this is always collision-free."""
+        return slugify(self.instance_name)
 
     async def async_load_stored_state(self) -> None:
         """Restore live inputs and the in-progress schedule after a restart."""
@@ -176,6 +192,7 @@ class WholesaleEvScheduleCoordinator(DataUpdateCoordinator[dict]):
         attribute = options.get(CONF_FORECAST_ATTRIBUTE, DEFAULT_FORECAST_ATTRIBUTE)
         datetime_key = options.get(CONF_FORECAST_DATETIME_KEY, DEFAULT_FORECAST_DATETIME_KEY)
         price_key = options.get(CONF_FORECAST_PRICE_KEY, DEFAULT_FORECAST_PRICE_KEY)
+        multiplier = float(options.get(CONF_FORECAST_UNIT_MULTIPLIER, DEFAULT_FORECAST_UNIT_MULTIPLIER))
 
         slots = []
         for point in entity.attributes.get(attribute, []):
@@ -185,7 +202,11 @@ class WholesaleEvScheduleCoordinator(DataUpdateCoordinator[dict]):
                 if dt_str is None or price_val is None:
                     continue
                 slot_dt = dt_util.as_local(parse_dt(dt_str))
-                slots.append({"date_time": slot_dt, "raw_price": float(price_val), "source": "predicted"})
+                slots.append({
+                    "date_time": slot_dt,
+                    "raw_price": round(float(price_val) * multiplier, 4),
+                    "source": "predicted",
+                })
             except (TypeError, ValueError) as err:
                 _LOGGER.debug("Skipping predicted price: %s", err)
         return slots
