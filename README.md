@@ -1,149 +1,158 @@
 # Wholesale EV Schedule
 
+A Home Assistant integration that works out the cheapest times to charge your
+EV from a wholesale/half-hourly electricity tariff (e.g. Octopus Agile), and
+tells you — via a simple on/off signal — when charging should happen.
+
 > **⚠️ Still evolving.** This has been run against a live Home Assistant
-> instance and produces real schedules, but new features land quickly and
-> each round is only verified against the Docker test suite before you try it
-> live — read the CHANGELOG-style notes below before upgrading an existing
-> install, since options/entities occasionally get restructured.
+> instance and produces real schedules, but it's under active development —
+> options and entities occasionally get restructured between updates. Read
+> the release notes before upgrading an existing install.
 
-A Home Assistant custom integration that schedules EV charging across the
-cheapest wholesale price windows. Ported from the scheduling algorithm in
-[homeassistant-pyscripts](https://github.com/TheCJGCJG/homeassistant-pyscripts)
-into a proper integration with a config flow for its inputs and `sensor`/
-`binary_sensor`/`number`/`datetime`/`button` entities for its outputs, instead
-of pyscript + `input_*` helpers.
+## What it does
 
-Supports **multiple instances** side by side (e.g. one per car) and is
-designed to run **alongside** an existing pyscript-based (or any other)
-EV-charging setup on the same HA instance: every entity_id an instance
-creates is forced to start with a prefix derived from that instance's name
-(see "Entity naming" below), so instances — and integrations — can never
-collide on entity_ids.
+You tell it two things: **how many hours** of charging you need, and **by
+when**. It watches your wholesale price data and works out the cheapest
+combination of time slots that adds up to what you need — including,
+optionally, splitting into several separate cheap windows rather than one
+long block. It then exposes a single **"charging desired"** signal that you
+wire into whatever actually controls your charger.
 
-## Structure
+It doesn't talk to your charger directly and doesn't need to know what brand
+it is — you connect the dots with a normal HA automation (see
+[Connecting your charger](#connecting-your-charger) below).
 
+## Requirements
+
+- Home Assistant 2026.3 or later.
+- A wholesale/half-hourly price source. Currently built in:
+  - **[Octopus Energy](https://github.com/BottlecapDave/HomeAssistant-OctopusEnergy)** integration (for actual, known rates)
+  - **[AgilePredict](https://agilepredict.com/v2/api_how_to/)** (for a price forecast beyond what's known yet — optional, improves scheduling further ahead)
+  - Anything else can be wired up via the "Custom" option in setup — see [Setup](#setup) below.
+- Some way to turn your charger on/off from Home Assistant (a smart switch,
+  the charger's own HA integration, whatever you've already got).
+
+## Installation
+
+Copy `custom_components/wholesale_ev_schedule/` into your Home Assistant
+`config/custom_components/` directory, then restart Home Assistant.
+
+## Setup
+
+Go to **Settings → Devices & services → Add Integration → Wholesale EV
+Schedule**. You'll be asked for:
+
+1. **A name** — just used to label the integration; if you're setting this up
+   for more than one car, give each one a distinct name (e.g. "Tesla EV
+   Schedule").
+2. **How often to re-evaluate** — how frequently it re-checks prices and
+   recomputes the schedule (5 minutes is a sensible default).
+3. **Where your actual rates come from** — pick "Octopus Energy" and select
+   your current-day and next-day rates entities (found under Settings →
+   Devices & services → Octopus Energy), or "Custom" to point at a different
+   source.
+4. **Where your price forecast comes from** (optional) — pick "AgilePredict"
+   and select the forecast sensor you've set up (see the
+   [AgilePredict HA guide](https://agilepredict.com/v2/api_how_to/)), "Custom"
+   for something else, or "None" to schedule from known/actual rates only.
+
+That's it for one-time setup. Everything else — how many hours you need,
+by when, and the scheduling tolerances below — is adjusted afterwards as
+live entities, no reconfiguration needed.
+
+## Daily use
+
+**Set these day-to-day:**
+- **Ready by** (`datetime`) — when charging needs to be finished by.
+- **Charging hours required** (`number`) — how many hours of charging you
+  need. Set to 0 to go idle.
+
+**Tune scheduling behaviour anytime** (these have sensible defaults, most
+people won't need to touch them):
+- **Gamble tolerance** — how much to trust predicted (not-yet-known) prices
+  vs. discounting them in favour of known rates. Higher = more willing to
+  bet on forecasts.
+- **Minimum block length** — won't schedule a charging session shorter than
+  this, to avoid rapidly switching your charger on and off.
+- **Maximum block length** — caps how long any single continuous charging
+  session can be (0 = no cap). If your cheapest hours are naturally split
+  into separate price dips, this can spread them into multiple smaller
+  sessions instead of one long one.
+- **Maximum price** — won't schedule anything above this average price per
+  session, even if it means missing your target hours.
+
+**Boost, stop, and reset:**
+- **Boost duration** (`number`) — set this to a number of hours to start
+  charging immediately for that long, ignoring the schedule. Resets to 0
+  automatically once it takes effect.
+- **Cancel boost** (button) — end an active boost early.
+- **Stop** (button) — clear today's schedule and cancel any boost, but
+  **keep** your ready-by time (useful if you've decided not to charge today
+  but the same deadline applies tomorrow).
+- **Reset** (button) — a full reset, clearing the ready-by time as well.
+  Handy to wire to an automation that fires when your charger becomes
+  unplugged, so the next time you plug in you're starting fresh.
+
+**Manual override:**
+- **Charge override** (`select`: Auto / Force On / Force Off) — leave on
+  "Auto" for normal scheduled behaviour. Switch to "Force On" or "Force Off"
+  to manually override the charging signal regardless of what the schedule
+  says — useful for "just charge now, I don't care about price" or "don't
+  charge no matter what, even if it's a cheap slot" (e.g. the car's in for
+  service).
+
+## What you'll see
+
+- **State** — idle / scheduled / charging / boosting / complete /
+  unschedulable / error, at a glance.
+- **Schedule** — the full list of upcoming charging sessions, with each
+  session's start/end time, average price, and confidence.
+- **Next slot start / end** — when the next charging session begins and ends.
+- **Hours remaining** / **Time remaining** — how much committed charging time
+  is left.
+- **Charging desired** (`binary_sensor`) — the actual on/off signal; see
+  below for wiring this to your charger.
+
+There's also a set of hidden diagnostic sensors (block count, further
+upcoming blocks, price ranges/averages, which data sources are active) —
+they're not shown on your dashboard by default, but are there for automations
+or if you want to add them yourself. Look under the integration's device page
+→ "Diagnostic" section to find and enable them.
+
+## Connecting your charger
+
+`binary_sensor.<prefix>_charging_desired` turns `on` when charging should be
+happening and `off` when it shouldn't (accounting for the schedule, any
+boost, and the manual override). Wire it to your charger with a simple
+automation, for example:
+
+```yaml
+automation:
+  - alias: "EV charger follow desired state"
+    trigger:
+      - platform: state
+        entity_id: binary_sensor.wholesale_ev_schedule_charging_desired
+    action:
+      - service: >-
+          switch.turn_{{ 'on' if trigger.to_state.state == 'on' else 'off' }}
+        target:
+          entity_id: switch.my_ev_charger
 ```
-custom_components/wholesale_ev_schedule/
-  scheduler.py      pure scheduling algorithm, no HA dependency
-  coordinator.py    reads price/charger entities, runs scheduler.py, persists state
-  providers.py      registry of known price-source shapes (Octopus Energy, AgilePredict)
-  config_flow.py    multi-step setup + options: name, charger, providers
-  entity.py         shared base — forces the <prefix>_ entity_id namespace
-  sensor.py         primary + diagnostic (hidden-by-default) output sensors
-  binary_sensor.py  charging_desired output
-  number.py         live inputs: hours required, boost duration, scheduling tolerances
-  datetime.py       ready_by — live input
-  button.py         boost_cancel, stop, reset — actions
-  brand/            icon/logo shown in the HA UI (local brand images, HA 2026.3+)
-```
 
-## Configuration
+Replace `switch.my_ev_charger` with whatever actually controls your charger —
+a smart plug, a switch exposed by the charger's own integration, or a script
+that calls an API. This integration doesn't need to know anything about your
+charger's own state to work.
 
-The config flow (and its matching **Configure** options flow) walks through:
+## Multiple cars
 
-1. **Name + charger + poll interval + providers** — a name for this instance
-   (becomes the entity_id prefix; give each instance a distinct one if
-   running more than one), the charger work-state sensor and its "connected"
-   states, how often to re-evaluate, and which named provider supplies your
-   actual and forecast wholesale prices.
-2. **Rates step** (shape depends on the provider chosen above):
-   - *Octopus Energy* — just the current-day and next-day rates event entities.
-   - *Custom* — the same two entities, plus the attribute/key names and a unit
-     multiplier, for a source not modelled in `providers.py`.
-3. **Forecast step** (skipped entirely if you pick "None"):
-   - *AgilePredict* ([agilepredict.com](https://agilepredict.com/v2/api_how_to/)) — just the forecast entity.
-   - *Custom* — the forecast entity plus attribute/key names and a unit multiplier.
+Set up the integration again with a different name — each instance gets its
+own set of entities prefixed with its own slugified name (e.g.
+`number.tesla_ev_schedule_charging_hours_required` vs.
+`number.polestar_ev_schedule_charging_hours_required`), so they run
+side by side without clashing.
 
-Scheduling tolerances (gamble tolerance, min/max block hours, max price)
-are **not** part of the config flow — they're live `number` entities (see
-below) you can tweak day-to-day without going through Settings and reloading.
+## Contributing / technical details
 
-Adding support for another price source (Amber, Nordpool, ...) means adding
-one entry to `providers.py` plus one config_flow step that mirrors the
-existing `rates_octopus_energy` / `forecast_agile_predict` ones — "Custom"
-already covers any source in the meantime.
-
-**Set daily (entities created by the integration):**
-- `datetime.<prefix>_ready_by` — when charging must be complete by
-- `number.<prefix>_charging_hours_required` — hours needed; 0 = idle
-
-**Live scheduling tolerances (adjust anytime, no reload needed):**
-- `number.<prefix>_gamble_tolerance` — 0–100%; how much to trust predicted (non-actual) prices
-- `number.<prefix>_min_block_hours` — minimum length of any single charging block
-- `number.<prefix>_max_block_hours` — maximum length of any single charging block; 0 = unlimited. Caps how large one *window* can be during selection so separate cheap price dips get combined into several smaller blocks instead of one long one — see the `find_optimal_slots` docstring in `scheduler.py` for the nuance around what this does and doesn't guarantee (it's a cap on selection, not an enforced rest period)
-- `number.<prefix>_max_price` — session-level average price ceiling
-
-**Boost / stop / reset:**
-- `number.<prefix>_boost_duration_hours` — set > 0 to start an immediate
-  boost for that many hours; resets to 0 once registered
-- `button.<prefix>_boost_cancel` — cancel an active boost early
-- `button.<prefix>_stop` — clear today's schedule and any boost, but **keep**
-  `ready_by` (useful if you've decided not to charge today but the same
-  deadline applies tomorrow)
-- `button.<prefix>_reset` — full reset: also clears `ready_by`. Intended to
-  be wired to an automation that fires when the charger becomes unplugged,
-  so the next plug-in starts from a completely clean slate. Scheduling
-  tolerances (gamble tolerance, block hours, max price) are left untouched —
-  those are standing preferences, not per-session state
-
-## Outputs
-
-**Primary (visible by default):**
-- `sensor.<prefix>_charging_state` — idle / scheduled / charging / boosting / complete / unschedulable / error
-- `sensor.<prefix>_charging_schedule` — `slots` attribute holds the full session list (every proposed/committed block, not just the next one), plus `future_slots`, `block_count`
-- `sensor.<prefix>_next_slot_start` / `_next_slot_end`
-- `sensor.<prefix>_hours_remaining` — plain decimal hours
-- `sensor.<prefix>_time_remaining` — the same value as a proper `duration` device-class sensor (minutes), for nicer HA rendering ("1:30:00" instead of "1.5")
-- `sensor.<prefix>_boost_ends_at` — timestamp of when an active boost ends; `unknown` outside of boosting
-- `binary_sensor.<prefix>_charging_desired` — drive your charger switch from this
-
-**Diagnostics (hidden by default — `entity_category: diagnostic`, still fully
-available for automations/history/graphs, just not cluttering your
-dashboard by default):**
-- `sensor.<prefix>_block_count` — number of blocks in the current schedule
-- `sensor.<prefix>_upcoming_block_2_start` / `_end`, `_upcoming_block_3_start` / `_end` — visibility into further blocks when the schedule has more than one (see `next_slot_start`/`_end` for the first)
-- `sensor.<prefix>_candidate_price_points` — how many price data points were available this cycle ("options considered")
-- `sensor.<prefix>_cheapest_available_price` / `_most_expensive_available_price` — range across the whole current candidate dataset, not just what got scheduled
-- `sensor.<prefix>_average_price_next_24h` / `_average_price_all_data`
-- `sensor.<prefix>_price_data_sources` — state is the total candidate count; `source_counts` attribute breaks it down by actual/predicted
-- `sensor.<prefix>_active_providers` — which named provider (see providers.py) supplies rates and forecast data, for visibility without inspecting config
-
-## Entity naming
-
-`entity.py` sets each entity's `entity_id` explicitly (rather than letting HA
-derive it from the friendly name) to `<platform>.<prefix>_<suffix>`, where
-`prefix` is the slugified instance name chosen during setup (defaults to
-`wholesale_ev_schedule` — see `const.DEFAULT_NAME`). The config flow enforces
-uniqueness on that slug via the entry's `unique_id`, so two instances can
-never end up sharing a prefix. `tests/test_entity_naming.py` and
-`tests/test_multi_instance.py` cover both the prefix guarantee and the
-no-collision-with-the-pyscript-original guarantee.
-
-## Testing
-
-All tests run inside Docker (`public.ecr.aws/docker/library/python:trixie`):
-
-```bash
-./run-tests.sh              # run tests
-./run-tests.sh --coverage   # with an HTML coverage report
-./run-tests.sh --shell      # interactive shell in the container
-```
-
-92 tests, 97% branch coverage (100% on `config_flow.py`, `providers.py`, `button.py`):
-- `tests/test_scheduler.py` — unit tests for the pure scheduling algorithm, including max_block_hours splitting and the price-summary diagnostics
-- `tests/test_integration_smoke.py` — full config/options flow, entity registration
-- `tests/test_providers.py` — custom rates/forecast provider branches, "no forecast" branch
-- `tests/test_multi_instance.py` — two instances with distinct names don't collide; duplicate-name/slug is rejected
-- `tests/test_entity_naming.py` — entity_id prefix guarantee, no collision with the pyscript original
-- `tests/test_price_parsing.py` — custom rate/forecast attribute & key names, unit multiplier, missing forecast entity, gamble tolerance, custom charger-connected states
-- `tests/test_tolerances_and_reload.py` — max_price/min_block_hours/max_block_hours enforcement, options-triggered reload picking up a changed update interval
-- `tests/test_boost_stop.py` — boost start/self-reset, boost cancel, stop vs reset, boost_ends_at visibility
-- `tests/test_diagnostics.py` — diagnostic sensors are hidden by default, price-summary diagnostics populate even when idle, block/upcoming-block sensors, live tuning number entities
-- `tests/test_edge_cases.py` — malformed price data, ready_by in the past, active-session persistence across a price refresh, natural boost expiry
-
-## CI / releases
-
-`.github/workflows/ci.yml` runs the Docker test suite on every push/PR to
-`main`, and publishes a GitHub release (zipping `custom_components/wholesale_ev_schedule/`)
-whenever `manifest.json`'s `version` changes and doesn't already have a
-matching tag.
+See [DEVELOPING.md](DEVELOPING.md) for the file structure, architecture
+notes, how to add a new price provider, and how to run the test suite.
