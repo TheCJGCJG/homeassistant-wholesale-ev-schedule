@@ -34,7 +34,7 @@
       },
       "forecast_agile_predict": {
         "title": "AgilePredict forecast",
-        "description": "The REST sensor entity you created pointing at https://agilepredict.com/api/{region} (see agilepredict.com/v2/api_how_to for the HA sensor snippet).",
+        "description": "The REST sensor entity you created pointing at the AgilePredict API for your region (see agilepredict.com/v2/api_how_to for the HA sensor snippet).",
         "data": {
           "forecast_entity": "Forecast entity"
         }

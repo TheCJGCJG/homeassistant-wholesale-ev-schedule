@@ -17,6 +17,7 @@ from custom_components.wholesale_ev_schedule.const import (
     CONF_RATES_ATTRIBUTE,
     DOMAIN,
 )
+from custom_components.wholesale_ev_schedule.scheduler import parse_dt
 
 from .factories import (
     CHARGER_STATE_ENTITY,
@@ -51,6 +52,42 @@ async def test_default_octopus_shaped_rates_produce_a_schedule(hass):
     sessions = coordinator.data["sessions"]
     assert sessions
     assert sessions[0]["avg_price"] == 5.0  # 0.05 GBP/kWh * default 100x multiplier
+
+
+async def test_next_slot_sensors_render_as_real_timestamps_not_strings(hass):
+    # Regression test: the next_slot_start/end sensors declare device_class
+    # "timestamp", which requires native_value to be a real datetime — not
+    # the raw ISO string stored in the session dict. Getting this wrong
+    # doesn't raise where you'd expect: HA's coordinator listener dispatch
+    # swallows the exception from async_write_ha_state and just logs it, so
+    # the bug silently leaves the entity's state stuck at "unknown" rather
+    # than crashing the test. Assert on the actual rendered state value.
+    entry = await async_setup_wholesale_entry(hass)
+    coordinator = hass.data[DOMAIN][entry.entry_id]
+
+    # Expensive now, cheap later — forces the optimizer to schedule a slot
+    # that starts in the future (next_slot) rather than immediately (which
+    # would leave next_slot None, a legitimately different, uninteresting case).
+    now = dt_util.now()
+    expensive_now = octopus_rate_points(now, 2, price_gbp_per_kwh=0.50)
+    cheap_later = octopus_rate_points(now + timedelta(hours=1), 4, price_gbp_per_kwh=0.05)
+    set_octopus_rate_entity(hass, CURRENT_RATES_ENTITY, expensive_now + cheap_later)
+    set_octopus_rate_entity(hass, NEXT_RATES_ENTITY, [])
+
+    await _schedule_after(hass, coordinator, ready_in_hours=3, required_hours=1.0)
+
+    next_slot = coordinator.data["next_slot"]
+    assert next_slot is not None
+
+    start_state = hass.states.get("sensor.wholesale_ev_schedule_next_slot_start")
+    end_state = hass.states.get("sensor.wholesale_ev_schedule_next_slot_end")
+
+    assert start_state.state not in ("unknown", "unavailable", None)
+    assert end_state.state not in ("unknown", "unavailable", None)
+    # HA's timestamp device_class rendering truncates to whole seconds, so
+    # compare within a tolerance rather than exact equality.
+    assert abs(parse_dt(start_state.state) - parse_dt(next_slot["start"])) < timedelta(seconds=1)
+    assert abs(parse_dt(end_state.state) - parse_dt(next_slot["end"])) < timedelta(seconds=1)
 
 
 async def test_custom_rate_attribute_and_keys_are_parsed(hass):

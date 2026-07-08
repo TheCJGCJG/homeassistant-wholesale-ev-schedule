@@ -1,6 +1,8 @@
 """Output sensors for Wholesale EV Schedule."""
 from __future__ import annotations
 
+from datetime import datetime
+
 from homeassistant.components.sensor import SensorEntity
 from homeassistant.config_entries import ConfigEntry
 from homeassistant.core import HomeAssistant
@@ -9,6 +11,7 @@ from homeassistant.helpers.entity_platform import AddEntitiesCallback
 from .const import DOMAIN
 from .coordinator import WholesaleEvScheduleCoordinator
 from .entity import WholesaleEvScheduleEntity
+from .scheduler import parse_dt
 
 
 async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry, async_add_entities: AddEntitiesCallback) -> None:
@@ -82,11 +85,11 @@ class EvChargingNextSlotStartSensor(WholesaleEvScheduleEntity, SensorEntity):
         super().__init__(coordinator, "sensor", "next_slot_start")
 
     @property
-    def native_value(self):
+    def native_value(self) -> datetime | None:
         if not self.coordinator.data:
             return None
         next_slot = self.coordinator.data.get("next_slot")
-        return next_slot["start"] if next_slot else None
+        return parse_dt(next_slot["start"]) if next_slot else None
 
 
 class EvChargingNextSlotEndSensor(WholesaleEvScheduleEntity, SensorEntity):
@@ -100,11 +103,11 @@ class EvChargingNextSlotEndSensor(WholesaleEvScheduleEntity, SensorEntity):
         super().__init__(coordinator, "sensor", "next_slot_end")
 
     @property
-    def native_value(self):
+    def native_value(self) -> datetime | None:
         if not self.coordinator.data:
             return None
         next_slot = self.coordinator.data.get("next_slot")
-        return next_slot["end"] if next_slot else None
+        return parse_dt(next_slot["end"]) if next_slot else None
 
 
 class EvChargingHoursRemainingSensor(WholesaleEvScheduleEntity, SensorEntity):
