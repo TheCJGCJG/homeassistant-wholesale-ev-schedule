@@ -1,0 +1,87 @@
+{
+  "config": {
+    "step": {
+      "user": {
+        "title": "Set up Wholesale EV Schedule",
+        "description": "Wire up your wholesale price entities and charger sensor. Ready-by time and hours required are set later as live entities.",
+        "data": {
+          "current_rates_entity": "Current-day rates entity",
+          "next_rates_entity": "Next-day rates entity",
+          "forecast_entity": "Price forecast entity (optional)",
+          "charger_state_entity": "Charger work-state sensor",
+          "charger_connected_states": "Charger states meaning \"connected\" (comma separated)"
+        }
+      },
+      "advanced": {
+        "title": "Scheduling tolerances and price parsing",
+        "description": "The parsing fields only need changing if your price entities aren't shaped like Octopus Energy's — e.g. a different wholesale price integration.",
+        "data": {
+          "gamble_tolerance": "Gamble tolerance",
+          "min_block_hours": "Minimum charging block length",
+          "max_price": "Maximum average price per session",
+          "update_interval_minutes": "Re-evaluate every (minutes)",
+          "rate_unit_multiplier": "Rate value multiplier (e.g. 100 to convert £/kWh to p/kWh)",
+          "rates_attribute": "Rate entity attribute name (list of rate points)",
+          "rate_start_key": "Rate point key: start time",
+          "rate_value_key": "Rate point key: price",
+          "forecast_attribute": "Forecast entity attribute name (list of forecast points)",
+          "forecast_datetime_key": "Forecast point key: date/time",
+          "forecast_price_key": "Forecast point key: price"
+        }
+      }
+    }
+  },
+  "options": {
+    "step": {
+      "init": {
+        "title": "Wholesale EV Schedule: entity wiring",
+        "data": {
+          "current_rates_entity": "Current-day rates entity",
+          "next_rates_entity": "Next-day rates entity",
+          "forecast_entity": "Price forecast entity (optional)",
+          "charger_state_entity": "Charger work-state sensor",
+          "charger_connected_states": "Charger states meaning \"connected\" (comma separated)"
+        }
+      },
+      "advanced": {
+        "title": "Scheduling tolerances and price parsing",
+        "data": {
+          "gamble_tolerance": "Gamble tolerance",
+          "min_block_hours": "Minimum charging block length",
+          "max_price": "Maximum average price per session",
+          "update_interval_minutes": "Re-evaluate every (minutes)",
+          "rate_unit_multiplier": "Rate value multiplier (e.g. 100 to convert £/kWh to p/kWh)",
+          "rates_attribute": "Rate entity attribute name (list of rate points)",
+          "rate_start_key": "Rate point key: start time",
+          "rate_value_key": "Rate point key: price",
+          "forecast_attribute": "Forecast entity attribute name (list of forecast points)",
+          "forecast_datetime_key": "Forecast point key: date/time",
+          "forecast_price_key": "Forecast point key: price"
+        }
+      }
+    }
+  },
+  "entity": {
+    "sensor": {
+      "charging_state": { "name": "State" },
+      "charging_schedule": { "name": "Schedule" },
+      "next_slot_start": { "name": "Next slot start" },
+      "next_slot_end": { "name": "Next slot end" },
+      "hours_remaining": { "name": "Hours remaining" }
+    },
+    "binary_sensor": {
+      "charging_desired": { "name": "Charging desired" }
+    },
+    "number": {
+      "charging_hours_required": { "name": "Charging hours required" },
+      "boost_duration_hours": { "name": "Boost duration" }
+    },
+    "datetime": {
+      "ready_by": { "name": "Ready by" }
+    },
+    "button": {
+      "boost_cancel": { "name": "Cancel boost" },
+      "stop": { "name": "Stop" }
+    }
+  }
+}

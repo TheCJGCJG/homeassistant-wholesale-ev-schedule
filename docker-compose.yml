@@ -1,0 +1,9 @@
+services:
+  test:
+    build: .
+    volumes:
+      - ./custom_components:/app/custom_components
+      - ./tests:/app/tests
+      - ./pytest.ini:/app/pytest.ini
+    environment:
+      - PYTHONUNBUFFERED=1

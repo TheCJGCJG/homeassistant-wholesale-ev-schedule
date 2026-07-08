@@ -1,0 +1,296 @@
+"""Unit tests for the pure scheduling logic in scheduler.py.
+
+These functions have no Home Assistant dependency, so they're tested directly
+without any hass fixture — same approach as the upstream pyscript's test suite
+this module was ported from.
+"""
+from datetime import datetime, timedelta
+
+import pytest
+
+from custom_components.wholesale_ev_schedule.scheduler import (
+    BASE_CREDIBILITY,
+    TIER_ACTUAL,
+    TIER_PREDICTED_0_24,
+    TIER_PREDICTED_24_48,
+    TIER_PREDICTED_48_72,
+    TIER_PREDICTED_72_PLUS,
+    assign_credibilities,
+    build_contiguous_runs,
+    compute_effective_price,
+    compute_hours_remaining,
+    deduplicate_and_sort_prices,
+    determine_state,
+    find_optimal_slots,
+    get_source_tier,
+    parse_dt,
+    parse_iso_str,
+    prune_and_classify,
+    slots_to_sessions,
+)
+
+NOW = datetime(2024, 1, 15, 10, 0)
+
+
+def make_slots(start, count, price=10.0, source="current_actual", step_minutes=30):
+    """Build `count` consecutive 30-min price slots starting at `start`."""
+    return [
+        {
+            "date_time": start + timedelta(minutes=step_minutes * i),
+            "raw_price": price,
+            "source": source,
+        }
+        for i in range(count)
+    ]
+
+
+# ---------------------------------------------------------------------------
+# get_source_tier / compute_effective_price
+# ---------------------------------------------------------------------------
+
+def test_get_source_tier_actual_sources_always_tier_actual():
+    assert get_source_tier("current_actual", NOW + timedelta(days=10), NOW) == TIER_ACTUAL
+    assert get_source_tier("next_actual", NOW + timedelta(days=10), NOW) == TIER_ACTUAL
+
+
+@pytest.mark.parametrize(
+    "hours_ahead,expected",
+    [
+        (1, TIER_PREDICTED_0_24),
+        (24, TIER_PREDICTED_0_24),
+        (25, TIER_PREDICTED_24_48),
+        (48, TIER_PREDICTED_24_48),
+        (49, TIER_PREDICTED_48_72),
+        (72, TIER_PREDICTED_48_72),
+        (73, TIER_PREDICTED_72_PLUS),
+    ],
+)
+def test_get_source_tier_predicted_horizon_boundaries(hours_ahead, expected):
+    slot_dt = NOW + timedelta(hours=hours_ahead)
+    assert get_source_tier("predicted", slot_dt, NOW) == expected
+
+
+def test_compute_effective_price_face_value_at_full_gamble_tolerance():
+    price = compute_effective_price(10.0, TIER_PREDICTED_72_PLUS, gamble_tolerance=100.0)
+    assert price == pytest.approx(10.0)
+
+
+def test_compute_effective_price_inflated_at_zero_gamble_tolerance():
+    price = compute_effective_price(10.0, TIER_PREDICTED_72_PLUS, gamble_tolerance=0.0)
+    assert price == pytest.approx(10.0 / BASE_CREDIBILITY[TIER_PREDICTED_72_PLUS])
+
+
+def test_compute_effective_price_actual_tier_always_face_value():
+    for tolerance in (0.0, 50.0, 100.0):
+        assert compute_effective_price(12.5, TIER_ACTUAL, tolerance) == pytest.approx(12.5)
+
+
+def test_assign_credibilities_adds_tier_and_effective_price():
+    slots = make_slots(NOW, 2, source="predicted")
+    result = assign_credibilities(slots, NOW, gamble_tolerance=50.0)
+    assert all("tier" in s and "effective_price" in s for s in result)
+    assert slots[0].get("tier") is None  # original list untouched
+
+
+# ---------------------------------------------------------------------------
+# build_contiguous_runs
+# ---------------------------------------------------------------------------
+
+def test_build_contiguous_runs_single_run():
+    slots = make_slots(NOW, 4)
+    runs = build_contiguous_runs(slots)
+    assert len(runs) == 1
+    assert len(runs[0]) == 4
+
+
+def test_build_contiguous_runs_splits_on_gap():
+    slots = make_slots(NOW, 2) + make_slots(NOW + timedelta(hours=2), 2)
+    runs = build_contiguous_runs(slots)
+    assert len(runs) == 2
+    assert len(runs[0]) == 2 and len(runs[1]) == 2
+
+
+def test_build_contiguous_runs_empty_input():
+    assert build_contiguous_runs([]) == []
+
+
+# ---------------------------------------------------------------------------
+# find_optimal_slots / slots_to_sessions
+# ---------------------------------------------------------------------------
+
+def test_find_optimal_slots_picks_cheapest_window():
+    cheap = make_slots(NOW + timedelta(hours=4), 2, price=5.0)
+    expensive = make_slots(NOW, 2, price=50.0)
+    adjusted = assign_credibilities(cheap + expensive, NOW, gamble_tolerance=100.0)
+
+    result = find_optimal_slots(
+        adjusted, required_slots=2, ready_by_dt=NOW + timedelta(hours=10), min_block_hours=1.0
+    )
+
+    assert len(result) == 2
+    assert all(s["raw_price"] == 5.0 for s in result)
+
+
+def test_find_optimal_slots_respects_ready_by():
+    slots = assign_credibilities(make_slots(NOW + timedelta(hours=20), 2, price=1.0), NOW, 100.0)
+    result = find_optimal_slots(
+        slots, required_slots=2, ready_by_dt=NOW + timedelta(hours=5), min_block_hours=1.0
+    )
+    assert result == []
+
+
+def test_find_optimal_slots_max_price_excludes_expensive_windows():
+    slots = assign_credibilities(make_slots(NOW, 2, price=30.0), NOW, 100.0)
+    result = find_optimal_slots(
+        slots, required_slots=2, ready_by_dt=NOW + timedelta(hours=5),
+        min_block_hours=1.0, max_price=20.0,
+    )
+    assert result == []
+
+
+def test_find_optimal_slots_returns_empty_for_zero_required():
+    slots = assign_credibilities(make_slots(NOW, 2), NOW, 100.0)
+    assert find_optimal_slots(slots, 0, NOW + timedelta(hours=5), 1.0) == []
+
+
+def test_slots_to_sessions_groups_contiguous_runs():
+    run1 = make_slots(NOW, 2, price=10.0)
+    run2 = make_slots(NOW + timedelta(hours=3), 2, price=20.0)
+    sessions = slots_to_sessions(run1 + run2)
+
+    assert len(sessions) == 2
+    assert sessions[0]["duration_hours"] == 1.0
+    assert sessions[0]["avg_price"] == 10.0
+    assert sessions[1]["avg_price"] == 20.0
+
+
+def test_slots_to_sessions_confidence_reflects_actual_rates():
+    sessions = slots_to_sessions(make_slots(NOW, 2, source="current_actual"))
+    assert sessions[0]["confidence"] == 100.0
+
+
+def test_slots_to_sessions_empty_input():
+    assert slots_to_sessions([]) == []
+
+
+# ---------------------------------------------------------------------------
+# parse_dt / parse_iso_str
+# ---------------------------------------------------------------------------
+
+def test_parse_iso_str_handles_z_suffix():
+    assert parse_iso_str("2024-01-15T10:00:00Z") == parse_iso_str("2024-01-15T10:00:00+00:00")
+
+
+def test_parse_dt_passthrough_for_datetime_objects():
+    assert parse_dt(NOW) is NOW
+
+
+def test_parse_dt_parses_string():
+    assert parse_dt(NOW.isoformat()) == NOW
+
+
+# ---------------------------------------------------------------------------
+# prune_and_classify / compute_hours_remaining
+# ---------------------------------------------------------------------------
+
+def _session(start, end, duration_hours=None):
+    return {
+        "start": start.isoformat(),
+        "end": end.isoformat(),
+        "duration_hours": duration_hours if duration_hours is not None else (end - start).total_seconds() / 3600,
+        "avg_price": 10.0,
+        "confidence": 100.0,
+    }
+
+
+def test_prune_and_classify_splits_active_and_future():
+    active = _session(NOW - timedelta(minutes=10), NOW + timedelta(minutes=20))
+    future = _session(NOW + timedelta(hours=1), NOW + timedelta(hours=2))
+    expired = _session(NOW - timedelta(hours=2), NOW - timedelta(hours=1))
+
+    active_result, future_result = prune_and_classify([active, future, expired], NOW)
+
+    assert active_result == active
+    assert future_result == [future]
+
+
+def test_prune_and_classify_no_active_session():
+    future = _session(NOW + timedelta(hours=1), NOW + timedelta(hours=2))
+    active_result, future_result = prune_and_classify([future], NOW)
+    assert active_result is None
+    assert future_result == [future]
+
+
+def test_compute_hours_remaining_counts_partial_active_plus_future():
+    active = _session(NOW - timedelta(minutes=30), NOW + timedelta(minutes=30))
+    future = _session(NOW + timedelta(hours=1), NOW + timedelta(hours=2))
+    remaining = compute_hours_remaining([future], active, NOW)
+    assert remaining == pytest.approx(1.5)
+
+
+def test_compute_hours_remaining_zero_when_nothing_scheduled():
+    assert compute_hours_remaining([], None, NOW) == 0.0
+
+
+# ---------------------------------------------------------------------------
+# determine_state
+# ---------------------------------------------------------------------------
+
+def test_determine_state_error_when_data_not_ok():
+    assert determine_state(1.0, False, None, [], 0.0, data_ok=False) == "error"
+
+
+def test_determine_state_idle_when_no_hours_required():
+    assert determine_state(0.0, False, None, [], 0.0, data_ok=True) == "idle"
+
+
+def test_determine_state_boosting_takes_priority_over_active_session():
+    assert determine_state(2.0, True, {"start": "x"}, [], 1.0, data_ok=True) == "boosting"
+
+
+def test_determine_state_charging_when_active_session():
+    assert determine_state(2.0, False, {"start": "x"}, [], 1.0, data_ok=True) == "charging"
+
+
+def test_determine_state_scheduled_when_future_sessions_only():
+    assert determine_state(2.0, False, None, [{"start": "x"}], 1.0, data_ok=True) == "scheduled"
+
+
+def test_determine_state_complete_when_nothing_left():
+    assert determine_state(2.0, False, None, [], 0.0, data_ok=True) == "complete"
+
+
+def test_determine_state_error_when_unschedulable_remainder():
+    assert determine_state(2.0, False, None, [], 1.0, data_ok=True) == "error"
+
+
+# ---------------------------------------------------------------------------
+# deduplicate_and_sort_prices
+# ---------------------------------------------------------------------------
+
+def test_deduplicate_actual_wins_over_predicted_for_same_slot():
+    predicted = {"date_time": NOW, "raw_price": 99.0, "source": "predicted"}
+    actual = {"date_time": NOW, "raw_price": 5.0, "source": "current_actual"}
+
+    result = deduplicate_and_sort_prices([predicted, actual], NOW - timedelta(minutes=10))
+
+    assert len(result) == 1
+    assert result[0]["source"] == "current_actual"
+
+
+def test_deduplicate_drops_past_slots():
+    past = {"date_time": NOW - timedelta(hours=2), "raw_price": 1.0, "source": "current_actual"}
+    future = {"date_time": NOW + timedelta(hours=1), "raw_price": 1.0, "source": "current_actual"}
+
+    result = deduplicate_and_sort_prices([past, future], NOW)
+
+    assert result == [future]
+
+
+def test_deduplicate_sorts_chronologically():
+    later = {"date_time": NOW + timedelta(hours=2), "raw_price": 1.0, "source": "current_actual"}
+    earlier = {"date_time": NOW + timedelta(hours=1), "raw_price": 1.0, "source": "current_actual"}
+
+    result = deduplicate_and_sort_prices([later, earlier], NOW)
+
+    assert [r["date_time"] for r in result] == [earlier["date_time"], later["date_time"]]
