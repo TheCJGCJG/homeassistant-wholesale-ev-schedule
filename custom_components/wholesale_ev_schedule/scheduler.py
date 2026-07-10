@@ -334,7 +334,7 @@ def determine_state(
     return "error"
 
 
-def next_ready_by(now_dt: datetime, hour: int = 7) -> datetime:
+def next_ready_by(now_dt: datetime, hour: int = 7, min_day_offset: int = 0) -> datetime:
     """The next occurrence of `hour`:00:00 strictly after now_dt, same tzinfo.
 
     Used both as the default ready_by on first setup and to roll ready_by
@@ -342,8 +342,14 @@ def next_ready_by(now_dt: datetime, hour: int = 7) -> datetime:
     standing daily target rather than something that needs resetting by hand
     every day. If now_dt is already before `hour` today, that's the result
     (e.g. 2am -> 7am *today*, a few hours away); otherwise it's tomorrow.
+
+    min_day_offset forces the result at least that many days ahead of today
+    (0 = as soon as possible — today if `hour` hasn't passed yet, otherwise
+    tomorrow; 1 = at least tomorrow; 2 = at least the day after tomorrow;
+    etc.), matching the "Next day / Next day+1/+2/+3" options configurable
+    at setup time.
     """
-    candidate = now_dt.replace(hour=hour, minute=0, second=0, microsecond=0)
+    candidate = now_dt.replace(hour=hour, minute=0, second=0, microsecond=0) + timedelta(days=min_day_offset)
     if candidate <= now_dt:
         candidate += timedelta(days=1)
     return candidate

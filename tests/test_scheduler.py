@@ -512,3 +512,40 @@ def test_next_ready_by_rolls_forward_at_the_exact_hour():
 def test_next_ready_by_respects_custom_hour():
     now = datetime(2024, 1, 15, 10, 0)
     assert next_ready_by(now, hour=22) == datetime(2024, 1, 15, 22, 0)
+
+
+# min_day_offset -- setup-time "Next day / Next day + 1/2/3" default ready-by
+# options (issue #2). Default (0, omitted above) must stay byte-identical to
+# the pre-existing behaviour, which the tests above already cover unmodified.
+
+def test_next_ready_by_day_offset_zero_matches_default_behaviour():
+    now = datetime(2024, 1, 15, 2, 0)
+    assert next_ready_by(now, hour=7, min_day_offset=0) == next_ready_by(now, hour=7)
+
+
+def test_next_ready_by_day_offset_one_forces_tomorrow_even_if_hour_not_yet_passed():
+    now = datetime(2024, 1, 15, 2, 0)  # 2am -- 7am hasn't happened yet today
+    assert next_ready_by(now, hour=7, min_day_offset=1) == datetime(2024, 1, 16, 7, 0)
+
+
+def test_next_ready_by_day_offset_one_matches_default_when_hour_already_passed():
+    now = datetime(2024, 1, 15, 15, 0)  # 3pm -- 7am already passed today
+    # Offset=1 ("at least tomorrow") and offset=0 ("as soon as possible")
+    # land on the same day here, since "as soon as possible" is already
+    # tomorrow once the hour has passed today.
+    assert next_ready_by(now, hour=7, min_day_offset=1) == datetime(2024, 1, 16, 7, 0)
+
+
+def test_next_ready_by_day_offset_two():
+    now = datetime(2024, 1, 15, 2, 0)
+    assert next_ready_by(now, hour=7, min_day_offset=2) == datetime(2024, 1, 17, 7, 0)
+
+
+def test_next_ready_by_day_offset_three():
+    now = datetime(2024, 1, 15, 2, 0)
+    assert next_ready_by(now, hour=7, min_day_offset=3) == datetime(2024, 1, 18, 7, 0)
+
+
+def test_next_ready_by_day_offset_rolls_forward_at_the_exact_hour():
+    now = datetime(2024, 1, 15, 7, 0)  # exactly 7am -- must not return "now"
+    assert next_ready_by(now, hour=7, min_day_offset=1) == datetime(2024, 1, 16, 7, 0)

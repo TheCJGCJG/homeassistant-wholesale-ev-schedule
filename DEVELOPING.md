@@ -49,10 +49,11 @@ custom_components/wholesale_ev_schedule/
   entity for it if a real need comes up.
 - **`ready_by` has no fixed default and never just "expires".** On first
   setup, and again every time the current `ready_by` is reached, it's set to
-  the next occurrence of `DEFAULT_READY_BY_HOUR` (`scheduler.next_ready_by`)
-  — see `_async_update_data` in `coordinator.py`. This makes "charge N hours
-  by 7am" a standing daily target instead of something that errors out or
-  needs resetting by hand.
+  the next occurrence of `self._default_ready_by_hour`, at least
+  `self._default_ready_by_day_offset` days out (`scheduler.next_ready_by`) —
+  see `_async_update_data` in `coordinator.py`. This makes "charge N hours by
+  7am" a standing daily target instead of something that errors out or needs
+  resetting by hand.
 - **`async_setup_entry` (`__init__.py`) registers a wall-clock-aligned minute
   tick via `async_track_time_change(hass, ..., second=0)`, in addition to the
   coordinator's own `update_interval_minutes` polling.** A `DataUpdateCoordinator`'s
@@ -64,6 +65,23 @@ custom_components/wholesale_ev_schedule/
   `coordinator.async_request_refresh()` once a minute at :00 seconds so
   schedule-driven state always catches up to a slot boundary within ~60s,
   regardless of `update_interval_minutes`.
+- **Setup-time "sensible defaults" (issue #2).** `CONF_DEFAULT_REQUIRED_HOURS`
+  / `CONF_DEFAULT_GAMBLE_TOLERANCE` / `CONF_DEFAULT_MAX_PRICE` /
+  `CONF_DEFAULT_MIN_BLOCK_HOURS` / `CONF_DEFAULT_READY_BY_HOUR` /
+  `CONF_DEFAULT_READY_BY_DAY_OFFSET` (`const.py`) are config-flow options,
+  shown in `base_schema()` (`config_flow.py`) on both the initial `user` step
+  and the options `init` step. They're read once at coordinator construction
+  into `self._default_*` instance attributes, each falling back to the
+  original hardcoded `DEFAULT_*` constant (or `0` for the day offset) when
+  unset — so an install that never touches them behaves exactly as before.
+  They're used only in two places: `async_load_stored_state()`'s fresh-install
+  fallback and `async_reset()`. Changing them via the options flow triggers
+  the same full reload that `CONF_UPDATE_INTERVAL_MINUTES` already does
+  (`_async_update_listener` in `__init__.py`), so no separate reload wiring
+  was needed. The day-offset select has exactly four options — value `0`
+  ("Next day": as soon as possible, i.e. today if the hour hasn't passed yet,
+  otherwise tomorrow) through `3` ("Next day + 3") — matching the wording
+  requested in the issue.
 
 ## Entity naming
 

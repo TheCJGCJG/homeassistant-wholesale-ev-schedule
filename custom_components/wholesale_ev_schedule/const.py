@@ -29,6 +29,24 @@ CONF_FORECAST_ENTITY = "forecast_entity"
 # than config-flow options that require a reload to change.
 CONF_UPDATE_INTERVAL_MINUTES = "update_interval_minutes"
 
+# Config / options keys — setup-time defaults. These don't affect the live
+# values directly; they're only the starting point on a fresh install (no
+# stored state yet) and what the "Reset" button restores every live value to
+# (see coordinator.py's async_load_stored_state/async_reset). All fall back to
+# the hardcoded DEFAULT_* constants below (or 0 for the day offset) when unset,
+# so an install with none of these customized behaves exactly as before.
+CONF_DEFAULT_REQUIRED_HOURS = "default_required_hours"
+CONF_DEFAULT_GAMBLE_TOLERANCE = "default_gamble_tolerance"
+CONF_DEFAULT_MAX_PRICE = "default_max_price"
+CONF_DEFAULT_MIN_BLOCK_HOURS = "default_min_block_hours"
+CONF_DEFAULT_READY_BY_HOUR = "default_ready_by_hour"
+# How many days ahead of "as soon as possible" the default ready_by should
+# land: 0 = next occurrence of default_ready_by_hour (today if not yet passed,
+# otherwise tomorrow) — the "Next day" option; 1/2/3 push it at least that
+# many days further out ("Next day + 1/2/3"). See scheduler.next_ready_by.
+CONF_DEFAULT_READY_BY_DAY_OFFSET = "default_ready_by_day_offset"
+DEFAULT_READY_BY_DAY_OFFSET = 0
+
 # Config / options keys — which named provider (see providers.py) supplies each
 # price source. "custom" unlocks the raw attribute/key fields below for a
 # source not modelled as a named provider.

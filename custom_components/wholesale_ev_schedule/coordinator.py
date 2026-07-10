@@ -17,6 +17,12 @@ from .const import (
     CHARGE_OVERRIDE_FORCE_OFF,
     CHARGE_OVERRIDE_FORCE_ON,
     CONF_CURRENT_RATES_ENTITY,
+    CONF_DEFAULT_GAMBLE_TOLERANCE,
+    CONF_DEFAULT_MAX_PRICE,
+    CONF_DEFAULT_MIN_BLOCK_HOURS,
+    CONF_DEFAULT_READY_BY_DAY_OFFSET,
+    CONF_DEFAULT_READY_BY_HOUR,
+    CONF_DEFAULT_REQUIRED_HOURS,
     CONF_FORECAST_ATTRIBUTE,
     CONF_FORECAST_DATETIME_KEY,
     CONF_FORECAST_ENTITY,
@@ -44,6 +50,7 @@ from .const import (
     DEFAULT_RATE_UNIT_MULTIPLIER,
     DEFAULT_RATE_VALUE_KEY,
     DEFAULT_RATES_ATTRIBUTE,
+    DEFAULT_READY_BY_DAY_OFFSET,
     DEFAULT_READY_BY_HOUR,
     DEFAULT_REQUIRED_HOURS,
     DEFAULT_UPDATE_INTERVAL_MINUTES,
@@ -82,9 +89,20 @@ class WholesaleEvScheduleCoordinator(DataUpdateCoordinator[dict]):
     price-source provider, and the poll interval live in config-entry options.
 
     ready_by has no fixed default: it's set to the next occurrence of
-    DEFAULT_READY_BY_HOUR on first setup, and automatically rolls forward to
-    the next occurrence again once reached (see _async_update_data), so
-    "charge N hours by 7am" renews itself daily without manual resetting.
+    self._default_ready_by_hour on first setup, and automatically rolls
+    forward to the next occurrence again once reached (see
+    _async_update_data), so "charge N hours by 7am" renews itself daily
+    without manual resetting.
+
+    The six self._default_* attributes below are read once at construction
+    from the config entry's options (CONF_DEFAULT_*, see const.py) — they're
+    the setup-time "sensible defaults" from issue #2: what a fresh install
+    (no stored state yet) starts with, and what the "Reset" button restores
+    every corresponding live value to. They deliberately aren't live values
+    themselves; changing them via the options flow triggers a full reload
+    (same as CONF_UPDATE_INTERVAL_MINUTES already does), which re-reads them
+    here — it does not retroactively touch whatever the live values currently
+    are.
     """
 
     def __init__(self, hass: HomeAssistant, entry: ConfigEntry) -> None:
@@ -98,11 +116,31 @@ class WholesaleEvScheduleCoordinator(DataUpdateCoordinator[dict]):
         self.entry = entry
         self._store = Store(hass, STORAGE_VERSION, f"{DOMAIN}_{entry.entry_id}_state")
 
+        # Setup-time defaults (see class docstring) -- fall back to the
+        # hardcoded DEFAULT_* constants / 0 so an install with none of these
+        # customized behaves exactly as before.
+        self._default_required_hours: float = float(
+            entry.options.get(CONF_DEFAULT_REQUIRED_HOURS, DEFAULT_REQUIRED_HOURS)
+        )
+        self._default_gamble_tolerance: float = float(
+            entry.options.get(CONF_DEFAULT_GAMBLE_TOLERANCE, DEFAULT_GAMBLE_TOLERANCE)
+        )
+        self._default_max_price: float = float(entry.options.get(CONF_DEFAULT_MAX_PRICE, DEFAULT_MAX_PRICE))
+        self._default_min_block_hours: float = float(
+            entry.options.get(CONF_DEFAULT_MIN_BLOCK_HOURS, DEFAULT_MIN_BLOCK_HOURS)
+        )
+        self._default_ready_by_hour: int = int(
+            entry.options.get(CONF_DEFAULT_READY_BY_HOUR, DEFAULT_READY_BY_HOUR)
+        )
+        self._default_ready_by_day_offset: int = int(
+            entry.options.get(CONF_DEFAULT_READY_BY_DAY_OFFSET, DEFAULT_READY_BY_DAY_OFFSET)
+        )
+
         self.ready_by: datetime | None = None
-        self.required_hours: float = DEFAULT_REQUIRED_HOURS
-        self.gamble_tolerance: float = DEFAULT_GAMBLE_TOLERANCE
-        self.min_block_hours: float = DEFAULT_MIN_BLOCK_HOURS
-        self.max_price: float = DEFAULT_MAX_PRICE
+        self.required_hours: float = self._default_required_hours
+        self.gamble_tolerance: float = self._default_gamble_tolerance
+        self.min_block_hours: float = self._default_min_block_hours
+        self.max_price: float = self._default_max_price
         self.charge_override: str = DEFAULT_CHARGE_OVERRIDE
         self.assumed_charge_kwh: float = DEFAULT_ASSUMED_CHARGE_KWH
 
@@ -132,15 +170,16 @@ class WholesaleEvScheduleCoordinator(DataUpdateCoordinator[dict]):
 
     async def async_load_stored_state(self) -> None:
         """Restore live inputs and the in-progress schedule after a restart.
-        ready_by defaults to the next DEFAULT_READY_BY_HOUR if never set."""
+        ready_by defaults to the next self._default_ready_by_hour (at least
+        self._default_ready_by_day_offset days out) if never set."""
         data = await self._store.async_load() or {}
         self.ready_by = parse_dt(data["ready_by"]) if data.get("ready_by") else next_ready_by(
-            dt_util.now(), DEFAULT_READY_BY_HOUR
+            dt_util.now(), self._default_ready_by_hour, self._default_ready_by_day_offset
         )
-        self.required_hours = data.get("required_hours", DEFAULT_REQUIRED_HOURS)
-        self.gamble_tolerance = data.get("gamble_tolerance", DEFAULT_GAMBLE_TOLERANCE)
-        self.min_block_hours = data.get("min_block_hours", DEFAULT_MIN_BLOCK_HOURS)
-        self.max_price = data.get("max_price", DEFAULT_MAX_PRICE)
+        self.required_hours = data.get("required_hours", self._default_required_hours)
+        self.gamble_tolerance = data.get("gamble_tolerance", self._default_gamble_tolerance)
+        self.min_block_hours = data.get("min_block_hours", self._default_min_block_hours)
+        self.max_price = data.get("max_price", self._default_max_price)
         self.charge_override = data.get("charge_override", DEFAULT_CHARGE_OVERRIDE)
         self.assumed_charge_kwh = data.get("assumed_charge_kwh", DEFAULT_ASSUMED_CHARGE_KWH)
         self._stored_sessions = data.get("sessions", [])
@@ -218,17 +257,21 @@ class WholesaleEvScheduleCoordinator(DataUpdateCoordinator[dict]):
         await self.async_refresh()
 
     async def async_reset(self) -> None:
-        """Put everything back to defaults: ready_by (next DEFAULT_READY_BY_HOUR),
-        required_hours, gamble tolerance, min block hours, max price, assumed
-        charge kWh, and the charge override, on top of clearing the schedule
-        and any boost like async_stop does. Intended to be triggered by an
-        automation on charger-unplugged, so the next plug-in starts from a
-        completely clean slate rather than carrying over yesterday's tweaks."""
-        self.ready_by = next_ready_by(dt_util.now(), DEFAULT_READY_BY_HOUR)
-        self.required_hours = DEFAULT_REQUIRED_HOURS
-        self.gamble_tolerance = DEFAULT_GAMBLE_TOLERANCE
-        self.min_block_hours = DEFAULT_MIN_BLOCK_HOURS
-        self.max_price = DEFAULT_MAX_PRICE
+        """Put everything back to the configured setup-time defaults (see
+        class docstring): ready_by (next self._default_ready_by_hour, at
+        least self._default_ready_by_day_offset days out), required_hours,
+        gamble tolerance, min block hours, max price, assumed charge kWh, and
+        the charge override, on top of clearing the schedule and any boost
+        like async_stop does. Intended to be triggered by an automation on
+        charger-unplugged, so the next plug-in starts from a completely clean
+        slate rather than carrying over yesterday's tweaks."""
+        self.ready_by = next_ready_by(
+            dt_util.now(), self._default_ready_by_hour, self._default_ready_by_day_offset
+        )
+        self.required_hours = self._default_required_hours
+        self.gamble_tolerance = self._default_gamble_tolerance
+        self.min_block_hours = self._default_min_block_hours
+        self.max_price = self._default_max_price
         self.assumed_charge_kwh = DEFAULT_ASSUMED_CHARGE_KWH
         self.charge_override = DEFAULT_CHARGE_OVERRIDE
         self._stored_sessions = []
@@ -358,11 +401,11 @@ class WholesaleEvScheduleCoordinator(DataUpdateCoordinator[dict]):
             self._boost_end = None
 
         # ready_by never just expires — once reached (or if somehow unset) it
-        # rolls forward to the next DEFAULT_READY_BY_HOUR automatically, so
-        # "charge N hours by 7am" is a standing target rather than something
-        # that needs resetting by hand every day.
+        # rolls forward to the next self._default_ready_by_hour automatically,
+        # so "charge N hours by 7am" is a standing target rather than
+        # something that needs resetting by hand every day.
         if self.ready_by is None or self.ready_by <= now_dt:
-            self.ready_by = next_ready_by(now_dt, DEFAULT_READY_BY_HOUR)
+            self.ready_by = next_ready_by(now_dt, self._default_ready_by_hour, self._default_ready_by_day_offset)
             await self._async_save_stored_state()
 
         if self.required_hours <= 0:
