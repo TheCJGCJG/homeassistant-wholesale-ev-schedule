@@ -15,6 +15,7 @@ from homeassistant.helpers.update_coordinator import DataUpdateCoordinator
 from homeassistant.util import slugify
 
 from .const import (
+    CHARGE_OVERRIDE_AUTO,
     CHARGE_OVERRIDE_FORCE_OFF,
     CHARGE_OVERRIDE_FORCE_ON,
     CONF_CURRENT_RATES_ENTITY,
@@ -78,6 +79,7 @@ from .scheduler import (
 )
 
 _LOGGER = logging.getLogger(__name__)
+_VALID_CHARGE_OVERRIDES = {CHARGE_OVERRIDE_AUTO, CHARGE_OVERRIDE_FORCE_ON, CHARGE_OVERRIDE_FORCE_OFF}
 
 
 class WholesaleEvScheduleCoordinator(DataUpdateCoordinator[dict]):
@@ -190,7 +192,7 @@ class WholesaleEvScheduleCoordinator(DataUpdateCoordinator[dict]):
             data.get("min_block_hours"), self._default_min_block_hours, "min_block_hours"
         )
         self.max_price = self._parse_stored_float(data.get("max_price"), self._default_max_price, "max_price")
-        self.charge_override = data.get("charge_override", DEFAULT_CHARGE_OVERRIDE)
+        self.charge_override = self._parse_stored_charge_override(data.get("charge_override"))
         self.assumed_charge_kwh = self._parse_stored_float(
             data.get("assumed_charge_kwh"), DEFAULT_ASSUMED_CHARGE_KWH, "assumed_charge_kwh"
         )
@@ -244,6 +246,18 @@ class WholesaleEvScheduleCoordinator(DataUpdateCoordinator[dict]):
         except (TypeError, ValueError) as err:
             _LOGGER.warning("Stored %s %r is invalid (%s); using default %s", field_name, value, err, default)
             return default
+
+    def _parse_stored_charge_override(self, value: str | None) -> str:
+        """Validate a stored charge_override against the enum, degrading to
+        DEFAULT_CHARGE_OVERRIDE if it's anything else -- an unrecognized value
+        would otherwise silently behave like "auto" (neither force branch in
+        _with_diagnostics matches it) while still being reported back as the
+        select entity's current_option, outside its declared options (#36)."""
+        if value in _VALID_CHARGE_OVERRIDES:
+            return value
+        if value is not None:
+            _LOGGER.warning("Stored charge_override %r is invalid; using default %s", value, DEFAULT_CHARGE_OVERRIDE)
+        return DEFAULT_CHARGE_OVERRIDE
 
     async def _async_save_stored_state(self) -> None:
         await self._store.async_save(

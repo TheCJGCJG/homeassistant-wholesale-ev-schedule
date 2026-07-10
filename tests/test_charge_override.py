@@ -106,3 +106,20 @@ async def test_override_survives_restart(hass):
     await coordinator.async_load_stored_state()
 
     assert coordinator.charge_override == "force_on"
+
+
+async def test_stored_invalid_charge_override_degrades_to_auto(hass):
+    # Regression for issue #36. A stored value outside the enum (schema
+    # drift, a manual edit) previously loaded as-is and silently behaved like
+    # "auto" (neither force branch in _with_diagnostics matched it) while
+    # still being reported as the select entity's current_option, a value
+    # outside its declared options.
+    entry = await async_setup_wholesale_entry(hass)
+    coordinator = hass.data[DOMAIN][entry.entry_id]
+    await coordinator._store.async_save({"charge_override": "some_bogus_value"})
+
+    await coordinator.async_load_stored_state()
+
+    assert coordinator.charge_override == "auto"
+    state = hass.states.get("select.wholesale_ev_schedule_charge_override")
+    assert state.state == "auto"
