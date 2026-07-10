@@ -15,6 +15,9 @@ Sources verified directly against the upstream integrations on 2026-07-08:
   — event entity `rates` attribute, each item {start, end, value_inc_vat}, value_inc_vat in GBP/kWh.
 - AgilePredict: https://agilepredict.com/v2/api_how_to/ and the live /api/{region} JSON response
   — `prices` list, each item {date_time, agile_pred}, agile_pred already in p/kWh.
+  Agile Forecast is a known fork/service that exposes the identical API shape,
+  so this provider entry covers both under a shared "AgilePredict-compatible"
+  label — see FORECAST_PROVIDER_AGILE_PREDICT below.
 """
 
 RATE_PROVIDER_OCTOPUS_ENERGY = "octopus_energy"
@@ -42,7 +45,7 @@ FORECAST_PROVIDERS = {
         "label": "None — schedule from actual rates only",
     },
     FORECAST_PROVIDER_AGILE_PREDICT: {
-        "label": "AgilePredict (agilepredict.com)",
+        "label": "AgilePredict-compatible API (e.g. AgilePredict, Agile Forecast)",
         "attribute": "prices",
         "datetime_key": "date_time",
         "price_key": "agile_pred",

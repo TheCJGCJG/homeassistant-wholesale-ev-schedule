@@ -27,7 +27,7 @@ it is — you connect the dots with a normal HA automation (see
 - Home Assistant 2026.3 or later.
 - A wholesale/half-hourly price source. Currently built in:
   - **[Octopus Energy](https://github.com/BottlecapDave/HomeAssistant-OctopusEnergy)** integration (for actual, known rates)
-  - **[AgilePredict](https://agilepredict.com/v2/api_how_to/)** (for a price forecast beyond what's known yet — optional, improves scheduling further ahead)
+  - **[AgilePredict](https://agilepredict.com/v2/api_how_to/)** or any API-compatible source (e.g. Agile Forecast) (for a price forecast beyond what's known yet — optional, improves scheduling further ahead)
   - Anything else can be wired up via the "Custom" option in setup — see [Setup](#setup) below.
 - Some way to turn your charger on/off from Home Assistant (a smart switch,
   the charger's own HA integration, whatever you've already got).
@@ -51,8 +51,10 @@ Schedule**. You'll be asked for:
    your current-day and next-day rates entities (found under Settings →
    Devices & services → Octopus Energy), or "Custom" to point at a different
    source.
-4. **Where your price forecast comes from** (optional) — pick "AgilePredict"
-   and select the forecast sensor you've set up (see the
+4. **Where your price forecast comes from** (optional) — pick
+   "AgilePredict-compatible API" and select the forecast sensor you've set
+   up (works with AgilePredict, Agile Forecast, or anything else exposing
+   the same API shape — see the
    [AgilePredict HA guide](https://agilepredict.com/v2/api_how_to/)), "Custom"
    for something else, or "None" to schedule from known/actual rates only.
 

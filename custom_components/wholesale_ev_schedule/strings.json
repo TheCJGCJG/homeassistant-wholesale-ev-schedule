@@ -32,8 +32,8 @@
         }
       },
       "forecast_agile_predict": {
-        "title": "AgilePredict forecast",
-        "description": "The REST sensor entity you created pointing at the AgilePredict API for your region (see agilepredict.com/v2/api_how_to for the HA sensor snippet).",
+        "title": "AgilePredict-compatible forecast",
+        "description": "The REST sensor entity you created pointing at an AgilePredict-compatible API for your region (e.g. AgilePredict or Agile Forecast — see agilepredict.com/v2/api_how_to for the HA sensor snippet; any source exposing the same response shape works here).",
         "data": {
           "forecast_entity": "Forecast entity"
         }
@@ -83,7 +83,7 @@
         }
       },
       "forecast_agile_predict": {
-        "title": "AgilePredict forecast",
+        "title": "AgilePredict-compatible forecast",
         "data": {
           "forecast_entity": "Forecast entity"
         }
