@@ -56,6 +56,44 @@ async def test_malformed_forecast_point_is_skipped_not_crashed(hass):
     assert coordinator.data["state"] in ("scheduled", "charging")
 
 
+async def test_rate_attribute_explicitly_none_is_skipped_not_crashed(hass):
+    # Regression for issue #24. entity.attributes.get(attribute, []) only
+    # applies its default when the key is absent -- an explicit `None` value
+    # (a real "not yet populated" pattern some sources use) previously reached
+    # `for rate in None:` and crashed the whole coordinator update.
+    entry = await async_setup_wholesale_entry(hass)
+    coordinator = hass.data[DOMAIN][entry.entry_id]
+
+    now = dt_util.now()
+    hass.states.async_set(CURRENT_RATES_ENTITY, "populated", {"rates": None})
+    set_octopus_rate_entity(hass, NEXT_RATES_ENTITY, [])
+
+    await coordinator.async_set_ready_by(now + timedelta(hours=3))
+    await coordinator.async_set_required_hours(1.0)
+    await hass.async_block_till_done()
+
+    assert coordinator.last_update_success is True
+    assert coordinator.data["state"] in ("error", "unschedulable")
+
+
+async def test_forecast_attribute_explicitly_none_is_skipped_not_crashed(hass):
+    # Regression for issue #24, forecast side.
+    entry = await async_setup_wholesale_entry(hass)
+    coordinator = hass.data[DOMAIN][entry.entry_id]
+
+    now = dt_util.now()
+    set_octopus_rate_entity(hass, CURRENT_RATES_ENTITY, octopus_rate_points(now, 6, 0.05))
+    set_octopus_rate_entity(hass, NEXT_RATES_ENTITY, [])
+    hass.states.async_set(FORECAST_ENTITY, "populated", {"prices": None})
+
+    await coordinator.async_set_ready_by(now + timedelta(hours=3))
+    await coordinator.async_set_required_hours(1.0)
+    await hass.async_block_till_done()
+
+    assert coordinator.last_update_success is True
+    assert coordinator.data["state"] in ("scheduled", "charging")
+
+
 async def test_ready_by_in_the_past_rolls_forward_instead_of_erroring(hass):
     entry = await async_setup_wholesale_entry(hass)
     coordinator = hass.data[DOMAIN][entry.entry_id]

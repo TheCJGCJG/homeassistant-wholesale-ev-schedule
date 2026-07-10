@@ -303,7 +303,10 @@ class WholesaleEvScheduleCoordinator(DataUpdateCoordinator[dict]):
         multiplier = float(options.get(CONF_RATE_UNIT_MULTIPLIER, DEFAULT_RATE_UNIT_MULTIPLIER))
 
         slots = []
-        for rate in entity.attributes.get(attribute, []):
+        # `.get(attribute, [])`'s default only applies when the key is absent -- an
+        # explicit `None` (a real pattern for "not yet populated" attributes) would
+        # otherwise reach `for rate in None:` and crash the whole coordinator update.
+        for rate in entity.attributes.get(attribute) or []:
             try:
                 dt_val = rate.get(start_key)
                 price_val = rate.get(value_key)
@@ -332,7 +335,9 @@ class WholesaleEvScheduleCoordinator(DataUpdateCoordinator[dict]):
         multiplier = float(options.get(CONF_FORECAST_UNIT_MULTIPLIER, DEFAULT_FORECAST_UNIT_MULTIPLIER))
 
         slots = []
-        for point in entity.attributes.get(attribute, []):
+        # See _parse_rate_entity -- `.get(attribute, [])`'s default only applies when
+        # the key is absent, not when it's explicitly `None`.
+        for point in entity.attributes.get(attribute) or []:
             try:
                 dt_str = point.get(datetime_key)
                 price_val = point.get(price_key)
