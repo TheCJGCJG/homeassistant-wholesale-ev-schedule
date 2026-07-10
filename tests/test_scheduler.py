@@ -273,6 +273,49 @@ def test_find_optimal_slots_caps_individual_window_size_with_max_block_hours():
     assert {s["date_time"] for s in result} == {s["date_time"] for s in run}
 
 
+def test_find_optimal_slots_max_block_hours_below_min_block_hours_is_floored_not_empty():
+    # Regression for issue #40. 4 hours of uniform, contiguous, cheap data
+    # (8 slots), required=4 slots, min_block_hours=1.0 (2 slots),
+    # max_block_hours=0.5 (1 slot -- less than min_block_hours). Previously
+    # max_slots_per_block < min_slots_per_block made the window-size range
+    # `range(min_slots_per_block, max_window_size + 1)` empty for every run,
+    # so no window was ever generated at all -- a silent false unschedulable
+    # regardless of the data. max_block_hours is now floored to
+    # min_block_hours instead.
+    run = make_slots(NOW, 8, price=1.0)
+    slots = assign_credibilities(run, NOW, gamble_tolerance=100.0)
+
+    result = find_optimal_slots(
+        slots,
+        required_slots=4,
+        ready_by_dt=NOW + timedelta(hours=10),
+        min_block_hours=1.0,
+        max_block_hours=0.5,
+    )
+
+    assert len(result) == 4
+
+
+def test_find_optimal_slots_negative_max_block_hours_is_treated_as_unlimited():
+    # Regression for issue #40. `if max_block_hours:` treated any negative
+    # value as truthy, producing a negative max_slots_per_block and the same
+    # empty-window-range bug as above. Per the function's own docstring,
+    # max_block_hours only applies "if given and > 0" -- zero or negative
+    # must mean unlimited, same as None.
+    run = make_slots(NOW, 8, price=1.0)
+    slots = assign_credibilities(run, NOW, gamble_tolerance=100.0)
+
+    result = find_optimal_slots(
+        slots,
+        required_slots=4,
+        ready_by_dt=NOW + timedelta(hours=10),
+        min_block_hours=1.0,
+        max_block_hours=-1.0,
+    )
+
+    assert len(result) == 4
+
+
 def test_find_optimal_slots_max_block_hours_produces_a_real_gap_around_a_price_spike():
     # Six contiguous slots priced [1, 1, 5, 5, 1, 1] — two genuinely separate
     # cheap dips either side of an expensive middle pair. required=4 slots

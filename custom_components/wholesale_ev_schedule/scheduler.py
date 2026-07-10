@@ -108,7 +108,19 @@ def find_optimal_slots(
     # A minimum block longer than the whole requirement would make every request for
     # less than that long unschedulable, so relax it to a single contiguous block.
     min_slots_per_block = min(max(1, math.ceil(min_block_hours * 2)), required_slots)
-    max_slots_per_block = math.ceil(max_block_hours * 2) if max_block_hours else None
+    # Per the docstring, max_block_hours only applies "if given and > 0" -- a
+    # zero or negative value means unlimited, same as None (issue #40 found a
+    # negative value was instead treated as truthy, producing a negative cap).
+    max_slots_per_block = math.ceil(max_block_hours * 2) if max_block_hours and max_block_hours > 0 else None
+    if max_slots_per_block is not None:
+        # A cap shorter than the minimum block would make every window's size
+        # range empty (`range(min_slots_per_block, max_window_size + 1)` below
+        # with max_window_size < min_slots_per_block), so no window is ever
+        # generated at all -- a silent false unschedulable regardless of the
+        # actual price data. Floor it to min_slots_per_block instead, the same
+        # way min_slots_per_block itself relaxes when it exceeds the
+        # requirement above.
+        max_slots_per_block = max(max_slots_per_block, min_slots_per_block)
 
     eligible = [s for s in candidate_slots if s["date_time"] + timedelta(minutes=30) <= ready_by_dt]
     eligible.sort(key=lambda s: s["date_time"])
