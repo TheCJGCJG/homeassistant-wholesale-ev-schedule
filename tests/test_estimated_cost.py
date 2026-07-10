@@ -48,6 +48,27 @@ async def test_next_slot_average_price_and_estimated_cost_reflect_the_schedule(h
     assert float(cost_state.state) == 70.0  # 10.0 * 7.0 (default assumed kWh)
 
 
+async def test_estimated_cost_exposes_calculation_breakdown_as_attributes(hass):
+    # Regression for issue #22: the bare state ("89.32... what?") gives no
+    # indication of what unit it's in or how it was derived, since this
+    # integration deliberately can't know a real currency unit. Expose the
+    # inputs as attributes instead, visible in HA's "more info" dialog.
+    entry = await async_setup_wholesale_entry(hass)
+    coordinator = hass.data[DOMAIN][entry.entry_id]
+
+    now = dt_util.now()
+    expensive_now = octopus_rate_points(now, 2, price_gbp_per_kwh=0.50)
+    cheap_later = octopus_rate_points(now + timedelta(hours=1), 4, price_gbp_per_kwh=0.10)
+    set_octopus_rate_entity(hass, CURRENT_RATES_ENTITY, expensive_now + cheap_later)
+    set_octopus_rate_entity(hass, NEXT_RATES_ENTITY, [])
+    await _schedule_after(hass, coordinator, ready_in_hours=3, required_hours=1.0)
+
+    cost_state = hass.states.get("sensor.wholesale_ev_schedule_next_slot_estimated_cost")
+    assert cost_state.attributes["next_slot_average_price"] == 10.0
+    assert cost_state.attributes["assumed_charge_kwh"] == coordinator.assumed_charge_kwh
+    assert "average_price" in cost_state.attributes["calculation"]
+
+
 async def test_estimated_cost_updates_when_assumed_charge_kwh_changes(hass):
     entry = await async_setup_wholesale_entry(hass)
     coordinator = hass.data[DOMAIN][entry.entry_id]
