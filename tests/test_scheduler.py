@@ -476,6 +476,35 @@ def test_prune_and_classify_no_active_session():
     assert future_result == [future]
 
 
+def test_prune_and_classify_keeps_first_of_two_overlapping_active_sessions():
+    # Regression for issue #43. Two sessions both satisfy start <= now < end
+    # -- shouldn't normally happen (the scheduler never generates overlapping
+    # sessions in one computation), but stored sessions persist across update
+    # cycles, so a bug elsewhere or a partial write could produce this.
+    # Previously the second unconditionally overwrote `active`, silently
+    # dropping the first with no trace and undercounting hours_remaining.
+    first = _session(NOW - timedelta(hours=1), NOW + timedelta(hours=1))
+    second = _session(NOW - timedelta(minutes=30), NOW + timedelta(minutes=30))
+
+    active_result, future_result = prune_and_classify([first, second], NOW)
+
+    assert active_result == first
+    assert future_result == []  # the discarded overlap must not leak into future either
+
+
+def test_prune_and_classify_overlap_resolution_follows_input_order():
+    # Same two sessions, reversed input order -- confirms which one wins is
+    # deterministic based on list order (first encountered), not some
+    # accidental artifact, and not fixed by e.g. earliest start.
+    first = _session(NOW - timedelta(hours=1), NOW + timedelta(hours=1))
+    second = _session(NOW - timedelta(minutes=30), NOW + timedelta(minutes=30))
+
+    active_result, future_result = prune_and_classify([second, first], NOW)
+
+    assert active_result == second
+    assert future_result == []
+
+
 def test_compute_hours_remaining_counts_partial_active_plus_future():
     active = _session(NOW - timedelta(minutes=30), NOW + timedelta(minutes=30))
     future = _session(NOW + timedelta(hours=1), NOW + timedelta(hours=2))

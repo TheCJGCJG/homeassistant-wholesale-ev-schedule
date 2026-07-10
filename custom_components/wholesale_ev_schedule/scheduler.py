@@ -261,13 +261,25 @@ def parse_dt(value) -> datetime:
 
 def prune_and_classify(sessions: list[dict], now_dt: datetime) -> tuple[dict | None, list[dict]]:
     """Split sessions into (active_session | None, [future_sessions]). Expired
-    sessions (end <= now_dt) are silently dropped."""
+    sessions (end <= now_dt) are silently dropped.
+
+    Sessions shouldn't normally overlap (the scheduler never generates
+    overlapping ones in a single computation), but sessions is long-lived
+    persisted state read back across update cycles -- if more than one
+    matches "active" (start <= now_dt < end), the first encountered wins
+    deterministically and the rest are logged and discarded, rather than the
+    previous behavior of silently overwriting `active` with no trace of the
+    discarded one, which undercounted compute_hours_remaining (issue #43).
+    """
     active = None
     future = []
     for s in sessions:
         start = parse_dt(s["start"])
         end = parse_dt(s["end"])
         if start <= now_dt < end:
+            if active is not None:
+                _LOGGER.warning("Discarding unexpected overlapping active session %r (keeping %r)", s, active)
+                continue
             active = s
         elif end > now_dt:
             future.append(s)
