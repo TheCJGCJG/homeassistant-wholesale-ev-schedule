@@ -4,10 +4,12 @@ A Home Assistant integration that works out the cheapest times to charge your
 EV from a wholesale/half-hourly electricity tariff (e.g. Octopus Agile), and
 tells you — via a simple on/off signal — when charging should happen.
 
-> **⚠️ Still evolving.** This has been run against a live Home Assistant
-> instance and produces real schedules, but it's under active development —
-> options and entities occasionally get restructured between updates. Read
-> the release notes before upgrading an existing install.
+> **Actively developed, and daily-driven.** I run this on my own car, every
+> day — so if it doesn't charge, that's my problem too, and I'm about as
+> motivated as anyone to keep it working. That said, it's still early,
+> single-maintainer software, and options/entities occasionally get
+> restructured between updates. Use it, but at your own risk — and read the
+> release notes before upgrading an existing install.
 
 ## What it does
 
@@ -21,6 +23,29 @@ wire into whatever actually controls your charger.
 It doesn't talk to your charger directly and doesn't need to know what brand
 it is — you connect the dots with a normal HA automation (see
 [Connecting your charger](#connecting-your-charger) below).
+
+## Why not just use Octopus's own target-rate feature?
+
+Fair question, and worth being honest about: if all you've got is **known,
+already-published** Octopus Agile rates, this integration isn't a big step up
+from Octopus's own built-in target-rate/smart-charging tools — those already
+pick the cheapest published half-hours perfectly well on their own.
+
+Where this integration actually earns its keep is **forecasting** — scheduling
+against *tomorrow's* prices hours before Octopus actually publishes them
+(typically mid-afternoon for the next day). Point it at
+**[AgilePredict](https://agilepredict.com/H/)** or
+**[Agile Forecast](https://agileforecast.co.uk/J?range=7d)** — two free,
+community-run Octopus Agile price prediction services — as the forecast
+source in [Setup](#setup) below, and it'll plan across known *and* predicted
+prices together, re-optimising as forecasts firm up and real rates get
+published. Turning an AgilePredict or Agile Forecast prediction into an
+actual charging schedule, not just a number on a dashboard, is the actual
+point of this add-on.
+
+Got your own prediction model, or a different forecast source entirely? Wire
+it up via the "Custom" forecast option in setup — anything exposing a list of
+predicted price points works.
 
 ## Requirements
 
