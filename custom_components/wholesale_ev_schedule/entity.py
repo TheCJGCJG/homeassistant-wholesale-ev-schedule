@@ -1,4 +1,5 @@
 """Shared entity base for Wholesale EV Schedule."""
+
 from __future__ import annotations
 
 from homeassistant.helpers.entity import DeviceInfo

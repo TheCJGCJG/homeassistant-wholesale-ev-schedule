@@ -2,6 +2,7 @@
 (gamble tolerance, min/max block hours, max price) that replaced the old
 config-flow-only options.
 """
+
 from datetime import timedelta
 
 import homeassistant.util.dt as dt_util
@@ -30,10 +31,18 @@ async def test_diagnostic_entities_are_hidden_by_default(hass):
     registry = er.async_get(hass)
 
     diagnostic_suffixes = [
-        "block_count", "upcoming_block_2_start", "upcoming_block_2_end",
-        "upcoming_block_3_start", "upcoming_block_3_end", "candidate_price_points",
-        "cheapest_available_price", "most_expensive_available_price",
-        "average_price_next_24h", "average_price_all_data", "price_data_sources", "active_providers",
+        "block_count",
+        "upcoming_block_2_start",
+        "upcoming_block_2_end",
+        "upcoming_block_3_start",
+        "upcoming_block_3_end",
+        "candidate_price_points",
+        "cheapest_available_price",
+        "most_expensive_available_price",
+        "average_price_next_24h",
+        "average_price_all_data",
+        "price_data_sources",
+        "active_providers",
     ]
     for suffix in diagnostic_suffixes:
         entry = registry.async_get(f"sensor.wholesale_ev_schedule_{suffix}")
@@ -90,9 +99,7 @@ async def test_block_count_and_upcoming_block_sensors_reflect_multi_block_schedu
     # or both blocks are visible across next_slot + upcoming_block_2).
     next_start = hass.states.get("sensor.wholesale_ev_schedule_next_slot_start")
     block2_start = hass.states.get("sensor.wholesale_ev_schedule_upcoming_block_2_start")
-    populated_starts = [
-        s for s in (next_start, block2_start) if s and s.state not in ("unknown", "unavailable")
-    ]
+    populated_starts = [s for s in (next_start, block2_start) if s and s.state not in ("unknown", "unavailable")]
     assert len(populated_starts) >= 1
 
 
@@ -111,8 +118,7 @@ async def test_price_data_sources_sensor_breaks_down_by_source(hass):
     set_octopus_rate_entity(hass, CURRENT_RATES_ENTITY, octopus_rate_points(now, 2, price_gbp_per_kwh=0.10))
     set_octopus_rate_entity(hass, NEXT_RATES_ENTITY, [])
     forecast_points = [
-        {"date_time": (now + timedelta(hours=1, minutes=30 * i)).isoformat(), "agile_pred": 5.0}
-        for i in range(2)
+        {"date_time": (now + timedelta(hours=1, minutes=30 * i)).isoformat(), "agile_pred": 5.0} for i in range(2)
     ]
     hass.states.async_set(FORECAST_ENTITY, "populated", {"prices": forecast_points})
     await coordinator.async_refresh()
@@ -131,9 +137,7 @@ async def test_tuning_number_entities_persist_via_coordinator(hass):
         ("number.wholesale_ev_schedule_min_block_hours", 1.5, "min_block_hours"),
         ("number.wholesale_ev_schedule_max_price", 12.5, "max_price"),
     ]:
-        await hass.services.async_call(
-            "number", "set_value", {"entity_id": entity_id, "value": value}, blocking=True
-        )
+        await hass.services.async_call("number", "set_value", {"entity_id": entity_id, "value": value}, blocking=True)
         await hass.async_block_till_done()
         assert getattr(coordinator, attr) == value
         assert float(hass.states.get(entity_id).state) == value

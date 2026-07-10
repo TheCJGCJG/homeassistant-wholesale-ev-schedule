@@ -4,6 +4,7 @@ These functions have no Home Assistant dependency, so they're tested directly
 without any hass fixture — same approach as the upstream pyscript's test suite
 this module was ported from.
 """
+
 from datetime import datetime, timedelta
 
 import pytest
@@ -49,6 +50,7 @@ def make_slots(start, count, price=10.0, source="current_actual", step_minutes=3
 # ---------------------------------------------------------------------------
 # get_source_tier / compute_effective_price
 # ---------------------------------------------------------------------------
+
 
 def test_get_source_tier_actual_sources_always_tier_actual():
     assert get_source_tier("current_actual", NOW + timedelta(days=10), NOW) == TIER_ACTUAL
@@ -98,6 +100,7 @@ def test_assign_credibilities_adds_tier_and_effective_price():
 # build_contiguous_runs
 # ---------------------------------------------------------------------------
 
+
 def test_build_contiguous_runs_single_run():
     slots = make_slots(NOW, 4)
     runs = build_contiguous_runs(slots)
@@ -120,14 +123,13 @@ def test_build_contiguous_runs_empty_input():
 # find_optimal_slots / slots_to_sessions
 # ---------------------------------------------------------------------------
 
+
 def test_find_optimal_slots_picks_cheapest_window():
     cheap = make_slots(NOW + timedelta(hours=4), 2, price=5.0)
     expensive = make_slots(NOW, 2, price=50.0)
     adjusted = assign_credibilities(cheap + expensive, NOW, gamble_tolerance=100.0)
 
-    result = find_optimal_slots(
-        adjusted, required_slots=2, ready_by_dt=NOW + timedelta(hours=10), min_block_hours=1.0
-    )
+    result = find_optimal_slots(adjusted, required_slots=2, ready_by_dt=NOW + timedelta(hours=10), min_block_hours=1.0)
 
     assert len(result) == 2
     assert all(s["raw_price"] == 5.0 for s in result)
@@ -135,17 +137,18 @@ def test_find_optimal_slots_picks_cheapest_window():
 
 def test_find_optimal_slots_respects_ready_by():
     slots = assign_credibilities(make_slots(NOW + timedelta(hours=20), 2, price=1.0), NOW, 100.0)
-    result = find_optimal_slots(
-        slots, required_slots=2, ready_by_dt=NOW + timedelta(hours=5), min_block_hours=1.0
-    )
+    result = find_optimal_slots(slots, required_slots=2, ready_by_dt=NOW + timedelta(hours=5), min_block_hours=1.0)
     assert result == []
 
 
 def test_find_optimal_slots_max_price_excludes_expensive_windows():
     slots = assign_credibilities(make_slots(NOW, 2, price=30.0), NOW, 100.0)
     result = find_optimal_slots(
-        slots, required_slots=2, ready_by_dt=NOW + timedelta(hours=5),
-        min_block_hours=1.0, max_price=20.0,
+        slots,
+        required_slots=2,
+        ready_by_dt=NOW + timedelta(hours=5),
+        min_block_hours=1.0,
+        max_price=20.0,
     )
     assert result == []
 
@@ -176,9 +179,7 @@ def test_find_optimal_slots_skips_overlap_then_fills_via_relaxed_fallback():
     ]
     slots = assign_credibilities(run, NOW, gamble_tolerance=100.0)
 
-    result = find_optimal_slots(
-        slots, required_slots=4, ready_by_dt=NOW + timedelta(hours=5), min_block_hours=1.0
-    )
+    result = find_optimal_slots(slots, required_slots=4, ready_by_dt=NOW + timedelta(hours=5), min_block_hours=1.0)
 
     assert {s["date_time"] for s in result} == {s["date_time"] for s in run}
 
@@ -192,9 +193,7 @@ def test_find_optimal_slots_skips_windows_that_would_leave_an_unfillable_gap():
     run = make_slots(NOW, 3, price=1.0)
     slots = assign_credibilities(run, NOW, gamble_tolerance=100.0)
 
-    result = find_optimal_slots(
-        slots, required_slots=3, ready_by_dt=NOW + timedelta(hours=5), min_block_hours=1.0
-    )
+    result = find_optimal_slots(slots, required_slots=3, ready_by_dt=NOW + timedelta(hours=5), min_block_hours=1.0)
 
     assert len(result) == 3
     assert build_contiguous_runs(sorted(result, key=lambda s: s["date_time"])) == [
@@ -218,9 +217,7 @@ def test_find_optimal_slots_skips_a_window_too_large_for_the_remaining_need():
     ]
     slots = assign_credibilities(run_a + run_b, NOW, gamble_tolerance=100.0)
 
-    result = find_optimal_slots(
-        slots, required_slots=4, ready_by_dt=NOW + timedelta(hours=10), min_block_hours=1.0
-    )
+    result = find_optimal_slots(slots, required_slots=4, ready_by_dt=NOW + timedelta(hours=10), min_block_hours=1.0)
 
     result_dts = {s["date_time"] for s in result}
     assert result_dts == {run_a[0]["date_time"], run_a[1]["date_time"], run_b[0]["date_time"], run_b[1]["date_time"]}
@@ -241,8 +238,11 @@ def test_find_optimal_slots_caps_individual_window_size_with_max_block_hours():
     slots = assign_credibilities(run, NOW, gamble_tolerance=100.0)
 
     result = find_optimal_slots(
-        slots, required_slots=4, ready_by_dt=NOW + timedelta(hours=5),
-        min_block_hours=0.5, max_block_hours=1.0,
+        slots,
+        required_slots=4,
+        ready_by_dt=NOW + timedelta(hours=5),
+        min_block_hours=0.5,
+        max_block_hours=1.0,
     )
 
     assert {s["date_time"] for s in result} == {s["date_time"] for s in run}
@@ -262,8 +262,11 @@ def test_find_optimal_slots_max_block_hours_produces_a_real_gap_around_a_price_s
     slots = assign_credibilities(run, NOW, gamble_tolerance=100.0)
 
     result = find_optimal_slots(
-        slots, required_slots=4, ready_by_dt=NOW + timedelta(hours=5),
-        min_block_hours=1.0, max_block_hours=1.0,
+        slots,
+        required_slots=4,
+        ready_by_dt=NOW + timedelta(hours=5),
+        min_block_hours=1.0,
+        max_block_hours=1.0,
     )
 
     sessions = build_contiguous_runs(sorted(result, key=lambda s: s["date_time"]))
@@ -278,8 +281,11 @@ def test_find_optimal_slots_max_block_hours_none_is_unlimited():
     slots = assign_credibilities(run, NOW, gamble_tolerance=100.0)
 
     result = find_optimal_slots(
-        slots, required_slots=4, ready_by_dt=NOW + timedelta(hours=5),
-        min_block_hours=0.5, max_block_hours=None,
+        slots,
+        required_slots=4,
+        ready_by_dt=NOW + timedelta(hours=5),
+        min_block_hours=0.5,
+        max_block_hours=None,
     )
 
     sessions = build_contiguous_runs(sorted(result, key=lambda s: s["date_time"]))
@@ -293,8 +299,11 @@ def test_find_optimal_slots_max_block_hours_zero_means_unlimited():
     slots = assign_credibilities(run, NOW, gamble_tolerance=100.0)
 
     result = find_optimal_slots(
-        slots, required_slots=4, ready_by_dt=NOW + timedelta(hours=5),
-        min_block_hours=0.5, max_block_hours=0,
+        slots,
+        required_slots=4,
+        ready_by_dt=NOW + timedelta(hours=5),
+        min_block_hours=0.5,
+        max_block_hours=0,
     )
 
     sessions = build_contiguous_runs(sorted(result, key=lambda s: s["date_time"]))
@@ -325,6 +334,7 @@ def test_slots_to_sessions_empty_input():
 # parse_dt / parse_iso_str
 # ---------------------------------------------------------------------------
 
+
 def test_parse_iso_str_handles_z_suffix():
     assert parse_iso_str("2024-01-15T10:00:00Z") == parse_iso_str("2024-01-15T10:00:00+00:00")
 
@@ -340,6 +350,7 @@ def test_parse_dt_parses_string():
 # ---------------------------------------------------------------------------
 # prune_and_classify / compute_hours_remaining
 # ---------------------------------------------------------------------------
+
 
 def _session(start, end, duration_hours=None):
     return {
@@ -384,6 +395,7 @@ def test_compute_hours_remaining_zero_when_nothing_scheduled():
 # determine_state
 # ---------------------------------------------------------------------------
 
+
 def test_determine_state_error_when_data_not_ok():
     assert determine_state(1.0, False, None, [], 0.0, data_ok=False) == "error"
 
@@ -416,6 +428,7 @@ def test_determine_state_error_when_unschedulable_remainder():
 # deduplicate_and_sort_prices
 # ---------------------------------------------------------------------------
 
+
 def test_deduplicate_actual_wins_over_predicted_for_same_slot():
     predicted = {"date_time": NOW, "raw_price": 99.0, "source": "predicted"}
     actual = {"date_time": NOW, "raw_price": 5.0, "source": "current_actual"}
@@ -447,6 +460,7 @@ def test_deduplicate_sorts_chronologically():
 # ---------------------------------------------------------------------------
 # summarize_prices
 # ---------------------------------------------------------------------------
+
 
 def test_summarize_prices_empty():
     assert summarize_prices([], NOW) == {
@@ -494,6 +508,7 @@ def test_summarize_prices_next_window_none_when_nothing_in_window():
 # next_ready_by
 # ---------------------------------------------------------------------------
 
+
 def test_next_ready_by_rolls_to_tomorrow_when_past_the_hour_today():
     now = datetime(2024, 1, 15, 15, 0)  # 3pm -- 7am has already passed today
     assert next_ready_by(now, hour=7) == datetime(2024, 1, 16, 7, 0)
@@ -517,6 +532,7 @@ def test_next_ready_by_respects_custom_hour():
 # min_day_offset -- setup-time "Next day / Next day + 1/2/3" default ready-by
 # options (issue #2). Default (0, omitted above) must stay byte-identical to
 # the pre-existing behaviour, which the tests above already cover unmodified.
+
 
 def test_next_ready_by_day_offset_zero_matches_default_behaviour():
     now = datetime(2024, 1, 15, 2, 0)

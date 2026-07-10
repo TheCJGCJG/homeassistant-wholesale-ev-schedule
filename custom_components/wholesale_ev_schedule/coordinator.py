@@ -1,4 +1,5 @@
 """Data update coordinator for Wholesale EV Schedule."""
+
 from __future__ import annotations
 
 import logging
@@ -129,9 +130,7 @@ class WholesaleEvScheduleCoordinator(DataUpdateCoordinator[dict]):
         self._default_min_block_hours: float = float(
             entry.options.get(CONF_DEFAULT_MIN_BLOCK_HOURS, DEFAULT_MIN_BLOCK_HOURS)
         )
-        self._default_ready_by_hour: int = int(
-            entry.options.get(CONF_DEFAULT_READY_BY_HOUR, DEFAULT_READY_BY_HOUR)
-        )
+        self._default_ready_by_hour: int = int(entry.options.get(CONF_DEFAULT_READY_BY_HOUR, DEFAULT_READY_BY_HOUR))
         self._default_ready_by_day_offset: int = int(
             entry.options.get(CONF_DEFAULT_READY_BY_DAY_OFFSET, DEFAULT_READY_BY_DAY_OFFSET)
         )
@@ -173,8 +172,10 @@ class WholesaleEvScheduleCoordinator(DataUpdateCoordinator[dict]):
         ready_by defaults to the next self._default_ready_by_hour (at least
         self._default_ready_by_day_offset days out) if never set."""
         data = await self._store.async_load() or {}
-        self.ready_by = parse_dt(data["ready_by"]) if data.get("ready_by") else next_ready_by(
-            dt_util.now(), self._default_ready_by_hour, self._default_ready_by_day_offset
+        self.ready_by = (
+            parse_dt(data["ready_by"])
+            if data.get("ready_by")
+            else next_ready_by(dt_util.now(), self._default_ready_by_hour, self._default_ready_by_day_offset)
         )
         self.required_hours = data.get("required_hours", self._default_required_hours)
         self.gamble_tolerance = data.get("gamble_tolerance", self._default_gamble_tolerance)
@@ -187,17 +188,19 @@ class WholesaleEvScheduleCoordinator(DataUpdateCoordinator[dict]):
         await self._async_save_stored_state()
 
     async def _async_save_stored_state(self) -> None:
-        await self._store.async_save({
-            "ready_by": self.ready_by.isoformat() if self.ready_by else None,
-            "required_hours": self.required_hours,
-            "gamble_tolerance": self.gamble_tolerance,
-            "min_block_hours": self.min_block_hours,
-            "max_price": self.max_price,
-            "charge_override": self.charge_override,
-            "assumed_charge_kwh": self.assumed_charge_kwh,
-            "sessions": self._stored_sessions,
-            "boost_end": self._boost_end.isoformat() if self._boost_end else None,
-        })
+        await self._store.async_save(
+            {
+                "ready_by": self.ready_by.isoformat() if self.ready_by else None,
+                "required_hours": self.required_hours,
+                "gamble_tolerance": self.gamble_tolerance,
+                "min_block_hours": self.min_block_hours,
+                "max_price": self.max_price,
+                "charge_override": self.charge_override,
+                "assumed_charge_kwh": self.assumed_charge_kwh,
+                "sessions": self._stored_sessions,
+                "boost_end": self._boost_end.isoformat() if self._boost_end else None,
+            }
+        )
 
     async def async_set_ready_by(self, value: datetime) -> None:
         self.ready_by = dt_util.as_local(value)
@@ -265,9 +268,7 @@ class WholesaleEvScheduleCoordinator(DataUpdateCoordinator[dict]):
         like async_stop does. Intended to be triggered by an automation on
         charger-unplugged, so the next plug-in starts from a completely clean
         slate rather than carrying over yesterday's tweaks."""
-        self.ready_by = next_ready_by(
-            dt_util.now(), self._default_ready_by_hour, self._default_ready_by_day_offset
-        )
+        self.ready_by = next_ready_by(dt_util.now(), self._default_ready_by_hour, self._default_ready_by_day_offset)
         self.required_hours = self._default_required_hours
         self.gamble_tolerance = self._default_gamble_tolerance
         self.min_block_hours = self._default_min_block_hours
@@ -309,11 +310,13 @@ class WholesaleEvScheduleCoordinator(DataUpdateCoordinator[dict]):
                 if dt_val is None or price_val is None:
                     continue
                 slot_dt = dt_util.as_local(parse_dt(dt_val))
-                slots.append({
-                    "date_time": slot_dt,
-                    "raw_price": round(float(price_val) * multiplier, 4),
-                    "source": source_label,
-                })
+                slots.append(
+                    {
+                        "date_time": slot_dt,
+                        "raw_price": round(float(price_val) * multiplier, 4),
+                        "source": source_label,
+                    }
+                )
             except (TypeError, ValueError) as err:
                 _LOGGER.debug("Skipping %s rate: %s", source_label, err)
         return slots
@@ -336,11 +339,13 @@ class WholesaleEvScheduleCoordinator(DataUpdateCoordinator[dict]):
                 if dt_str is None or price_val is None:
                     continue
                 slot_dt = dt_util.as_local(parse_dt(dt_str))
-                slots.append({
-                    "date_time": slot_dt,
-                    "raw_price": round(float(price_val) * multiplier, 4),
-                    "source": "predicted",
-                })
+                slots.append(
+                    {
+                        "date_time": slot_dt,
+                        "raw_price": round(float(price_val) * multiplier, 4),
+                        "source": "predicted",
+                    }
+                )
             except (TypeError, ValueError) as err:
                 _LOGGER.debug("Skipping predicted price: %s", err)
         return slots
@@ -382,7 +387,10 @@ class WholesaleEvScheduleCoordinator(DataUpdateCoordinator[dict]):
         future_sessions = []
         if slots_still_needed > 0:
             future_slots = find_optimal_slots(
-                candidate_slots, slots_still_needed, self.ready_by, self.min_block_hours,
+                candidate_slots,
+                slots_still_needed,
+                self.ready_by,
+                self.min_block_hours,
                 max_price=self.max_price,
             )
             future_sessions = slots_to_sessions(future_slots)
@@ -440,29 +448,53 @@ class WholesaleEvScheduleCoordinator(DataUpdateCoordinator[dict]):
         return result
 
     def _idle_result(self, now_dt: datetime, price_summary: dict) -> dict:
-        return self._with_diagnostics({
-            "state": STATE_IDLE, "desired": False, "sessions": [], "active_slot": None,
-            "next_slot": None, "hours_remaining": 0.0, "error_reason": None,
-            "calculated_at": now_dt.isoformat(),
-        }, price_summary)
+        return self._with_diagnostics(
+            {
+                "state": STATE_IDLE,
+                "desired": False,
+                "sessions": [],
+                "active_slot": None,
+                "next_slot": None,
+                "hours_remaining": 0.0,
+                "error_reason": None,
+                "calculated_at": now_dt.isoformat(),
+            },
+            price_summary,
+        )
 
     def _error_result(self, reason: str, now_dt: datetime, price_summary: dict) -> dict:
-        return self._with_diagnostics({
-            "state": STATE_ERROR, "desired": False, "sessions": self._stored_sessions,
-            "active_slot": None, "next_slot": None, "hours_remaining": 0.0,
-            "error_reason": reason, "calculated_at": now_dt.isoformat(),
-        }, price_summary)
+        return self._with_diagnostics(
+            {
+                "state": STATE_ERROR,
+                "desired": False,
+                "sessions": self._stored_sessions,
+                "active_slot": None,
+                "next_slot": None,
+                "hours_remaining": 0.0,
+                "error_reason": reason,
+                "calculated_at": now_dt.isoformat(),
+            },
+            price_summary,
+        )
 
     def _boosting_result(self, now_dt: datetime, price_summary: dict) -> dict:
         active, future = prune_and_classify(self._stored_sessions, now_dt)
         hours_remaining = compute_hours_remaining(future, active, now_dt)
-        return self._with_diagnostics({
-            "state": STATE_BOOSTING, "desired": True, "sessions": self._stored_sessions,
-            "active_slot": active, "next_slot": future[0] if future else None,
-            "upcoming_slots": future,
-            "hours_remaining": hours_remaining, "error_reason": None,
-            "calculated_at": now_dt.isoformat(), "boost_end": self._boost_end.isoformat(),
-        }, price_summary)
+        return self._with_diagnostics(
+            {
+                "state": STATE_BOOSTING,
+                "desired": True,
+                "sessions": self._stored_sessions,
+                "active_slot": active,
+                "next_slot": future[0] if future else None,
+                "upcoming_slots": future,
+                "hours_remaining": hours_remaining,
+                "error_reason": None,
+                "calculated_at": now_dt.isoformat(),
+                "boost_end": self._boost_end.isoformat(),
+            },
+            price_summary,
+        )
 
     def _schedule_result(self, sessions: list[dict], now_dt: datetime, price_summary: dict) -> dict:
         active, future = prune_and_classify(sessions, now_dt)
@@ -473,22 +505,39 @@ class WholesaleEvScheduleCoordinator(DataUpdateCoordinator[dict]):
                 f"No slots satisfy constraints: {self.required_hours}h needed, "
                 f"max_price={self.max_price}/kWh, min_block_hours={self.min_block_hours}h"
             )
-            return self._with_diagnostics({
-                "state": STATE_UNSCHEDULABLE, "desired": False, "sessions": [],
-                "active_slot": None, "next_slot": None, "hours_remaining": self.required_hours,
-                "error_reason": reason, "calculated_at": now_dt.isoformat(),
-            }, price_summary)
+            return self._with_diagnostics(
+                {
+                    "state": STATE_UNSCHEDULABLE,
+                    "desired": False,
+                    "sessions": [],
+                    "active_slot": None,
+                    "next_slot": None,
+                    "hours_remaining": self.required_hours,
+                    "error_reason": reason,
+                    "calculated_at": now_dt.isoformat(),
+                },
+                price_summary,
+            )
 
         sm_state = determine_state(
-            required_hours=self.required_hours, boost_active=False, active_session=active,
-            future_sessions=future, hours_remaining=hours_remaining, data_ok=True,
+            required_hours=self.required_hours,
+            boost_active=False,
+            active_session=active,
+            future_sessions=future,
+            hours_remaining=hours_remaining,
+            data_ok=True,
         )
-        return self._with_diagnostics({
-            "state": sm_state,
-            "desired": sm_state == "charging",
-            "sessions": sessions, "active_slot": active,
-            "next_slot": future[0] if future else None,
-            "upcoming_slots": future,
-            "hours_remaining": hours_remaining, "error_reason": None,
-            "calculated_at": now_dt.isoformat(),
-        }, price_summary)
+        return self._with_diagnostics(
+            {
+                "state": sm_state,
+                "desired": sm_state == "charging",
+                "sessions": sessions,
+                "active_slot": active,
+                "next_slot": future[0] if future else None,
+                "upcoming_slots": future,
+                "hours_remaining": hours_remaining,
+                "error_reason": None,
+                "calculated_at": now_dt.isoformat(),
+            },
+            price_summary,
+        )

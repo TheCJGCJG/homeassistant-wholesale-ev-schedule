@@ -5,6 +5,7 @@ Ported from https://github.com/TheCJGCJG/homeassistant-pyscripts
 this algorithm. Keeping these functions free of HA imports keeps them unit-testable
 in isolation, same as the source project.
 """
+
 from __future__ import annotations
 
 import logging
@@ -126,20 +127,19 @@ def find_optimal_slots(
             max_window_size = min(max_window_size, max_slots_per_block)
         for size in range(min_slots_per_block, max_window_size + 1):
             for start_idx in range(len(run) - size + 1):
-                w_slots = run[start_idx:start_idx + size]
+                w_slots = run[start_idx : start_idx + size]
                 avg_eff = sum(s["effective_price"] for s in w_slots) / size
-                windows.append({
-                    "slots": w_slots,
-                    "dts": {s["date_time"] for s in w_slots},
-                    "size": size,
-                    "avg_eff": avg_eff,
-                })
+                windows.append(
+                    {
+                        "slots": w_slots,
+                        "dts": {s["date_time"] for s in w_slots},
+                        "size": size,
+                        "avg_eff": avg_eff,
+                    }
+                )
 
     if max_price is not None:
-        windows = [
-            w for w in windows
-            if sum(s["raw_price"] for s in w["slots"]) / w["size"] <= max_price
-        ]
+        windows = [w for w in windows if sum(s["raw_price"] for s in w["slots"]) / w["size"] <= max_price]
         if not windows:
             return []
 
@@ -200,13 +200,15 @@ def slots_to_sessions(selected_slots: list[dict]) -> list[dict]:
         end = run[-1]["date_time"] + timedelta(minutes=30)
         avg_price = sum(s["raw_price"] for s in run) / len(run)
         avg_cred = sum(BASE_CREDIBILITY.get(s.get("tier", TIER_ACTUAL), 1.0) for s in run) / len(run)
-        sessions.append({
-            "start": start.isoformat(),
-            "end": end.isoformat(),
-            "duration_hours": len(run) * 0.5,
-            "avg_price": round(avg_price, 2),
-            "confidence": round(avg_cred * 100, 1),
-        })
+        sessions.append(
+            {
+                "start": start.isoformat(),
+                "end": end.isoformat(),
+                "duration_hours": len(run) * 0.5,
+                "avg_price": round(avg_price, 2),
+                "confidence": round(avg_cred * 100, 1),
+            }
+        )
     return sessions
 
 

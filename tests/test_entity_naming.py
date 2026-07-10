@@ -2,6 +2,7 @@
 running on the same HA instance (e.g. the pyscript-based original this was
 ported from), and between two instances of this integration itself.
 """
+
 from homeassistant.helpers import entity_registry as er
 from homeassistant.util import slugify
 

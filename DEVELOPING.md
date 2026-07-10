@@ -149,15 +149,19 @@ make security        # bandit (SAST on custom_components/) + pip-audit (dependen
 make check           # test + lint + format-check + security, all of the above
 ```
 
-`ruff`'s lint rules (`E`/`F`/`W`/`I`/`B`/`UP`/`SIM`/`C4`) are enforced in CI via
-the `lint` job. `bandit`/`pip-audit` and `format-check` are available locally
-via `make security` / `make format-check` but aren't a CI gate yet.
+`ruff check`, `ruff format --check`, and `bandit` are all enforced in CI (see
+below) and must pass before merging. `pip-audit` runs in CI too, but only
+informationally (`continue-on-error`) — transitive-dependency CVEs are what
+`.github/dependabot.yml` is for; hand-pinning a transitive package to chase a
+clean `pip-audit` run isn't worth fighting pip's resolver over.
 
 ## CI / releases
 
-`.github/workflows/ci.yml` runs the Docker test suite and the ruff lint check
-on every push/PR to `main`, and publishes a GitHub release (zipping
-`custom_components/wholesale_ev_schedule/`) whenever `manifest.json`'s
+`.github/workflows/ci.yml` has three jobs: `test` (the Docker test suite),
+`lint` (`ruff check` + `ruff format --check`), and `security` (`bandit`,
+blocking; `pip-audit`, informational only). All three run on every push/PR to
+`main`. `release` depends on all three and publishes a GitHub release
+(zipping `custom_components/wholesale_ev_schedule/`) whenever `manifest.json`'s
 `version` changes and doesn't already have a
 matching tag — so bumping the version is what triggers a release, not every
 commit.

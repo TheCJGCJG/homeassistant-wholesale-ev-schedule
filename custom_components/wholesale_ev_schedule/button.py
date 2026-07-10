@@ -1,4 +1,5 @@
 """Action buttons for Wholesale EV Schedule."""
+
 from __future__ import annotations
 
 from homeassistant.components.button import ButtonEntity
@@ -13,11 +14,13 @@ from .entity import WholesaleEvScheduleEntity
 
 async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry, async_add_entities: AddEntitiesCallback) -> None:
     coordinator: WholesaleEvScheduleCoordinator = hass.data[DOMAIN][entry.entry_id]
-    async_add_entities([
-        EvChargingBoostCancelButton(coordinator),
-        EvChargingStopButton(coordinator),
-        EvChargingResetButton(coordinator),
-    ])
+    async_add_entities(
+        [
+            EvChargingBoostCancelButton(coordinator),
+            EvChargingStopButton(coordinator),
+            EvChargingResetButton(coordinator),
+        ]
+    )
 
 
 class EvChargingBoostCancelButton(WholesaleEvScheduleEntity, ButtonEntity):

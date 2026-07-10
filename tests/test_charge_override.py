@@ -2,6 +2,7 @@
 the old charger-specific "work state" entity wiring so this integration
 doesn't need to know anything about a particular charger brand.
 """
+
 from datetime import timedelta
 
 import homeassistant.util.dt as dt_util
@@ -85,7 +86,8 @@ async def test_override_select_entity_persists_via_coordinator(hass):
     coordinator = hass.data[DOMAIN][entry.entry_id]
 
     await hass.services.async_call(
-        "select", "select_option",
+        "select",
+        "select_option",
         {"entity_id": "select.wholesale_ev_schedule_charge_override", "option": "force_on"},
         blocking=True,
     )

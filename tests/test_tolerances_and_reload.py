@@ -3,6 +3,7 @@ coordinator state, not config options), and confirming that options requiring
 a coordinator rebuild (update_interval_minutes) actually take effect after an
 options-flow save (via the config-entry reload triggered in __init__.py).
 """
+
 from datetime import timedelta
 
 import homeassistant.util.dt as dt_util

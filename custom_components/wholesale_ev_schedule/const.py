@@ -1,4 +1,5 @@
 """Constants for the Wholesale EV Schedule integration."""
+
 from homeassistant.const import Platform
 
 DOMAIN = "wholesale_ev_schedule"

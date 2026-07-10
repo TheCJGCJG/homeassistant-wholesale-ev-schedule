@@ -1,4 +1,5 @@
 """Live-adjustable numeric inputs for Wholesale EV Schedule."""
+
 from __future__ import annotations
 
 from homeassistant.components.number import NumberEntity, NumberMode
@@ -13,14 +14,16 @@ from .entity import WholesaleEvScheduleEntity
 
 async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry, async_add_entities: AddEntitiesCallback) -> None:
     coordinator: WholesaleEvScheduleCoordinator = hass.data[DOMAIN][entry.entry_id]
-    async_add_entities([
-        EvChargingHoursRequiredNumber(coordinator),
-        EvChargingBoostDurationNumber(coordinator),
-        EvChargingGambleToleranceNumber(coordinator),
-        EvChargingMinBlockHoursNumber(coordinator),
-        EvChargingMaxPriceNumber(coordinator),
-        EvChargingAssumedChargeKwhNumber(coordinator),
-    ])
+    async_add_entities(
+        [
+            EvChargingHoursRequiredNumber(coordinator),
+            EvChargingBoostDurationNumber(coordinator),
+            EvChargingGambleToleranceNumber(coordinator),
+            EvChargingMinBlockHoursNumber(coordinator),
+            EvChargingMaxPriceNumber(coordinator),
+            EvChargingAssumedChargeKwhNumber(coordinator),
+        ]
+    )
 
 
 class EvChargingHoursRequiredNumber(WholesaleEvScheduleEntity, NumberEntity):

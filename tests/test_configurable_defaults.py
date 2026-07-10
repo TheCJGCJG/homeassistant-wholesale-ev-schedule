@@ -6,6 +6,7 @@ fresh install starts with and what the Reset button restores every
 corresponding live value to -- never a live value directly. See the
 coordinator.py class docstring.
 """
+
 from datetime import timedelta
 
 import homeassistant.util.dt as dt_util
@@ -48,9 +49,7 @@ async def test_fresh_install_uses_configured_custom_defaults(hass):
     assert coordinator.min_block_hours == 1.5
     assert coordinator.ready_by.hour == 21
     # min_day_offset=2 -- ready_by must land at least 2 days out from setup time.
-    assert coordinator.ready_by >= dt_util.now().replace(hour=21, minute=0, second=0, microsecond=0) + timedelta(
-        days=2
-    )
+    assert coordinator.ready_by >= dt_util.now().replace(hour=21, minute=0, second=0, microsecond=0) + timedelta(days=2)
 
 
 async def test_fresh_install_falls_back_to_hardcoded_defaults_when_unconfigured(hass):
@@ -85,9 +84,7 @@ async def test_reset_restores_configured_custom_defaults_not_hardcoded_ones(hass
     assert coordinator.max_price == 35.0
     assert coordinator.min_block_hours == 1.5
     assert coordinator.ready_by.hour == 21
-    assert coordinator.ready_by >= dt_util.now().replace(hour=21, minute=0, second=0, microsecond=0) + timedelta(
-        days=2
-    )
+    assert coordinator.ready_by >= dt_util.now().replace(hour=21, minute=0, second=0, microsecond=0) + timedelta(days=2)
     # None of these should equal the old hardcoded constants (all deliberately
     # distinct in CUSTOM_DEFAULT_OPTIONS above).
     assert coordinator.required_hours != DEFAULT_REQUIRED_HOURS

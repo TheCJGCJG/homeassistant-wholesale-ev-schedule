@@ -9,6 +9,7 @@ block counts, further upcoming blocks, and the market-data summary (price
 range, source breakdown, active providers) that answers "what did the
 optimizer have to choose from".
 """
+
 from __future__ import annotations
 
 from datetime import datetime
@@ -28,30 +29,32 @@ from .scheduler import parse_dt
 
 async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry, async_add_entities: AddEntitiesCallback) -> None:
     coordinator: WholesaleEvScheduleCoordinator = hass.data[DOMAIN][entry.entry_id]
-    async_add_entities([
-        EvChargingStateSensor(coordinator),
-        EvChargingScheduleSensor(coordinator),
-        EvChargingNextSlotStartSensor(coordinator),
-        EvChargingNextSlotEndSensor(coordinator),
-        EvChargingNextSlotAveragePriceSensor(coordinator),
-        EvChargingNextSlotEstimatedCostSensor(coordinator),
-        EvChargingHoursRemainingSensor(coordinator),
-        EvChargingTimeRemainingSensor(coordinator),
-        EvChargingBoostEndsAtSensor(coordinator),
-        # Diagnostics — hidden by default.
-        EvChargingBlockCountSensor(coordinator),
-        EvChargingUpcomingBlock2StartSensor(coordinator),
-        EvChargingUpcomingBlock2EndSensor(coordinator),
-        EvChargingUpcomingBlock3StartSensor(coordinator),
-        EvChargingUpcomingBlock3EndSensor(coordinator),
-        EvChargingCandidatePricePointsSensor(coordinator),
-        EvChargingCheapestAvailablePriceSensor(coordinator),
-        EvChargingMostExpensiveAvailablePriceSensor(coordinator),
-        EvChargingAveragePriceNext24hSensor(coordinator),
-        EvChargingAveragePriceAllDataSensor(coordinator),
-        EvChargingPriceDataSourcesSensor(coordinator),
-        EvChargingActiveProvidersSensor(coordinator),
-    ])
+    async_add_entities(
+        [
+            EvChargingStateSensor(coordinator),
+            EvChargingScheduleSensor(coordinator),
+            EvChargingNextSlotStartSensor(coordinator),
+            EvChargingNextSlotEndSensor(coordinator),
+            EvChargingNextSlotAveragePriceSensor(coordinator),
+            EvChargingNextSlotEstimatedCostSensor(coordinator),
+            EvChargingHoursRemainingSensor(coordinator),
+            EvChargingTimeRemainingSensor(coordinator),
+            EvChargingBoostEndsAtSensor(coordinator),
+            # Diagnostics — hidden by default.
+            EvChargingBlockCountSensor(coordinator),
+            EvChargingUpcomingBlock2StartSensor(coordinator),
+            EvChargingUpcomingBlock2EndSensor(coordinator),
+            EvChargingUpcomingBlock3StartSensor(coordinator),
+            EvChargingUpcomingBlock3EndSensor(coordinator),
+            EvChargingCandidatePricePointsSensor(coordinator),
+            EvChargingCheapestAvailablePriceSensor(coordinator),
+            EvChargingMostExpensiveAvailablePriceSensor(coordinator),
+            EvChargingAveragePriceNext24hSensor(coordinator),
+            EvChargingAveragePriceAllDataSensor(coordinator),
+            EvChargingPriceDataSourcesSensor(coordinator),
+            EvChargingActiveProvidersSensor(coordinator),
+        ]
+    )
 
 
 def _upcoming_slot(coordinator: WholesaleEvScheduleCoordinator, index: int) -> dict | None:
@@ -77,6 +80,7 @@ def _next_slot_average_price(coordinator: WholesaleEvScheduleCoordinator) -> flo
 # =============================================================================
 # Primary sensors
 # =============================================================================
+
 
 class EvChargingStateSensor(WholesaleEvScheduleEntity, SensorEntity):
     """Current state machine state."""
@@ -265,6 +269,7 @@ class EvChargingBoostEndsAtSensor(WholesaleEvScheduleEntity, SensorEntity):
 # Diagnostics — hidden by default (entity_registry_visible_default=False),
 # grouped under the device's Diagnostic section.
 # =============================================================================
+
 
 class _DiagnosticSensor(WholesaleEvScheduleEntity, SensorEntity):
     _attr_entity_category = EntityCategory.DIAGNOSTIC

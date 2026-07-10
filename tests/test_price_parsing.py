@@ -2,6 +2,7 @@
 shapes, missing optional entities, and gamble tolerance — the axes that make
 this integration "highly configurable" beyond the Octopus Energy defaults.
 """
+
 from datetime import timedelta
 
 import homeassistant.util.dt as dt_util
@@ -97,10 +98,7 @@ async def test_custom_rate_attribute_and_keys_are_parsed(hass):
     coordinator = hass.data[DOMAIN][entry.entry_id]
 
     now = dt_util.now()
-    custom_points = [
-        {"from": (now + timedelta(minutes=30 * i)).isoformat(), "per_kwh": 8.0}
-        for i in range(6)
-    ]
+    custom_points = [{"from": (now + timedelta(minutes=30 * i)).isoformat(), "per_kwh": 8.0} for i in range(6)]
     hass.states.async_set(CURRENT_RATES_ENTITY, "populated", {"forecasts": custom_points})
     hass.states.async_set(NEXT_RATES_ENTITY, "populated", {"forecasts": []})
 
@@ -133,8 +131,7 @@ async def test_gamble_tolerance_zero_excludes_predicted_only_data(hass):
     now = dt_util.now()
     # Only forecast data available -- no actual rates at all.
     forecast_points = [
-        {"date_time": (now + timedelta(minutes=30 * i)).isoformat(), "agile_pred": 1.0}
-        for i in range(6)
+        {"date_time": (now + timedelta(minutes=30 * i)).isoformat(), "agile_pred": 1.0} for i in range(6)
     ]
     hass.states.async_set(FORECAST_ENTITY, "populated", {"prices": forecast_points})
     hass.states.async_set(CURRENT_RATES_ENTITY, "populated", {"rates": []})

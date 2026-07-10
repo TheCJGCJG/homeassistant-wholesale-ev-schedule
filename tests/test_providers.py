@@ -3,6 +3,7 @@ for rates and/or forecast routes to the manual-fields steps, and choosing "no
 forecast" skips the forecast step entirely — the branches providers.py and
 config_flow.py's _ProviderStepsMixin exist to support.
 """
+
 from homeassistant import config_entries
 from homeassistant.const import CONF_NAME
 from homeassistant.data_entry_flow import FlowResultType
@@ -29,9 +30,7 @@ from .factories import BASE_INPUT, FORECAST_AGILE_PREDICT_INPUT, RATES_OCTOPUS_I
 
 
 async def test_custom_rates_provider_routes_to_manual_fields_step(hass):
-    result = await hass.config_entries.flow.async_init(
-        DOMAIN, context={"source": config_entries.SOURCE_USER}
-    )
+    result = await hass.config_entries.flow.async_init(DOMAIN, context={"source": config_entries.SOURCE_USER})
     result = await hass.config_entries.flow.async_configure(
         result["flow_id"], {**BASE_INPUT, CONF_NAME: DEFAULT_NAME, "rates_provider": RATE_PROVIDER_CUSTOM}
     )
@@ -58,9 +57,7 @@ async def test_custom_rates_provider_routes_to_manual_fields_step(hass):
 
 
 async def test_custom_forecast_provider_routes_to_manual_fields_step(hass):
-    result = await hass.config_entries.flow.async_init(
-        DOMAIN, context={"source": config_entries.SOURCE_USER}
-    )
+    result = await hass.config_entries.flow.async_init(DOMAIN, context={"source": config_entries.SOURCE_USER})
     result = await hass.config_entries.flow.async_configure(
         result["flow_id"], {**BASE_INPUT, CONF_NAME: DEFAULT_NAME, "forecast_provider": FORECAST_PROVIDER_CUSTOM}
     )
@@ -82,9 +79,7 @@ async def test_custom_forecast_provider_routes_to_manual_fields_step(hass):
 
 
 async def test_no_forecast_provider_skips_forecast_step_entirely(hass):
-    result = await hass.config_entries.flow.async_init(
-        DOMAIN, context={"source": config_entries.SOURCE_USER}
-    )
+    result = await hass.config_entries.flow.async_init(DOMAIN, context={"source": config_entries.SOURCE_USER})
     result = await hass.config_entries.flow.async_configure(
         result["flow_id"], {**BASE_INPUT, CONF_NAME: DEFAULT_NAME, "forecast_provider": FORECAST_PROVIDER_NONE}
     )
