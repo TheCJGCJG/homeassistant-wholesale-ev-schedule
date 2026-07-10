@@ -162,6 +162,37 @@ async def test_active_session_survives_a_price_refresh(hass):
     assert coordinator.data["active_slot"] == active_before
 
 
+async def test_active_session_survives_all_price_entities_going_unavailable(hass):
+    # Regression for issue #31. All price sources going unavailable at once
+    # (e.g. right after an HA restart, before the price-source integration
+    # has finished loading) is exactly the scenario _error_result exists to
+    # report -- but it must not silently drop an already in-progress session;
+    # charging_desired flipping off mid-session over a transient, unrelated
+    # price-source hiccup would stop the physical charge for no real reason.
+    entry = await async_setup_wholesale_entry(hass)
+    coordinator = hass.data[DOMAIN][entry.entry_id]
+
+    now = dt_util.now()
+    set_octopus_rate_entity(hass, CURRENT_RATES_ENTITY, octopus_rate_points(now, 6, 0.05))
+    set_octopus_rate_entity(hass, NEXT_RATES_ENTITY, [])
+    await coordinator.async_set_ready_by(now + timedelta(hours=3))
+    await coordinator.async_set_required_hours(1.0)
+    await hass.async_block_till_done()
+
+    active_before = coordinator.data["active_slot"]
+    assert active_before is not None
+    assert coordinator.data["desired"] is True
+
+    hass.states.async_set(CURRENT_RATES_ENTITY, "unavailable", {})
+    hass.states.async_set(NEXT_RATES_ENTITY, "unavailable", {})
+    hass.states.async_set(FORECAST_ENTITY, "unavailable", {})
+    await coordinator.async_refresh()
+
+    assert coordinator.data["state"] == "error"  # still surfaced -- price data really is missing
+    assert coordinator.data["active_slot"] == active_before
+    assert coordinator.data["desired"] is True
+
+
 async def test_boost_expires_naturally_and_resumes_normal_state(hass):
     entry = await async_setup_wholesale_entry(hass)
     coordinator = hass.data[DOMAIN][entry.entry_id]

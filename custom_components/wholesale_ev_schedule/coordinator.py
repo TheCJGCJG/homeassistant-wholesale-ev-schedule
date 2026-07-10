@@ -482,14 +482,24 @@ class WholesaleEvScheduleCoordinator(DataUpdateCoordinator[dict]):
         )
 
     def _error_result(self, reason: str, now_dt: datetime, price_summary: dict) -> dict:
+        # A transient price-data gap (e.g. right after an HA restart, before
+        # the price-source integration has finished loading) must not
+        # silently drop an already-in-progress session -- see issue #31.
+        # Compute active/future from stored state the same way
+        # _boosting_result does, instead of unconditionally reporting
+        # nothing in progress just because this cycle couldn't compute a
+        # fresh schedule.
+        active, future = prune_and_classify(self._stored_sessions, now_dt)
+        hours_remaining = compute_hours_remaining(future, active, now_dt)
         return self._with_diagnostics(
             {
                 "state": STATE_ERROR,
-                "desired": False,
+                "desired": active is not None,
                 "sessions": self._stored_sessions,
-                "active_slot": None,
-                "next_slot": None,
-                "hours_remaining": 0.0,
+                "active_slot": active,
+                "next_slot": future[0] if future else None,
+                "upcoming_slots": future,
+                "hours_remaining": hours_remaining,
                 "error_reason": reason,
                 "calculated_at": now_dt.isoformat(),
             },
