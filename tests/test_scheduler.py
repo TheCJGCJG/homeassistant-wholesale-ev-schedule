@@ -90,6 +90,19 @@ def test_compute_effective_price_actual_tier_always_face_value():
         assert compute_effective_price(12.5, TIER_ACTUAL, tolerance) == pytest.approx(12.5)
 
 
+def test_compute_effective_price_clamps_above_100_instead_of_inverting_ranking():
+    # Regression for issue #41. gamble_tolerance > 100 previously pushed
+    # eff_cred above 1.0 for predicted tiers, making a predicted price
+    # *cheaper* than an equally-priced actual one -- the exact opposite of
+    # the documented "at 100 all prices are taken at face value" intent.
+    # Clamped to 100, a predicted price must never come out cheaper than an
+    # actual price at the same raw value.
+    actual = compute_effective_price(10.0, TIER_ACTUAL, gamble_tolerance=150.0)
+    predicted = compute_effective_price(10.0, TIER_PREDICTED_72_PLUS, gamble_tolerance=150.0)
+    assert predicted >= actual
+    assert predicted == pytest.approx(10.0)  # clamped to 100 => eff_cred=1.0 => face value, same as actual
+
+
 def test_assign_credibilities_adds_tier_and_effective_price():
     slots = make_slots(NOW, 2, source="predicted")
     result = assign_credibilities(slots, NOW, gamble_tolerance=50.0)

@@ -45,7 +45,16 @@ def get_source_tier(source: str, slot_dt: datetime, now_dt: datetime) -> str:
 
 def compute_effective_price(raw_price: float, tier: str, gamble_tolerance: float) -> float:
     """Risk-adjusted price used for slot ranking. Low gamble_tolerance inflates predicted
-    prices, favouring known actual rates; at 100 all prices are taken at face value."""
+    prices, favouring known actual rates; at 100 all prices are taken at face value.
+
+    gamble_tolerance is clamped to [0, 100] -- its only intended domain. Above
+    100, eff_cred exceeds 1.0 for predicted tiers, making a predicted price
+    *cheaper* than an equally-priced actual one and inverting the documented
+    ranking (issue #41). Sufficiently below 0, eff_cred crosses zero and this
+    function divides by it (issue #42). The live number entity already
+    clamps to [0, 100], but a stored value can bypass that (see coordinator.py).
+    """
+    gamble_tolerance = max(0.0, min(100.0, gamble_tolerance))
     base_cred = BASE_CREDIBILITY[tier]
     eff_cred = base_cred + (1.0 - base_cred) * (gamble_tolerance / 100.0)
     return raw_price / eff_cred
