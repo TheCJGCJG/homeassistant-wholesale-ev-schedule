@@ -162,6 +162,84 @@ a smart plug, a switch exposed by the charger's own integration, or a script
 that calls an API. This integration doesn't need to know anything about your
 charger's own state to work.
 
+If your charger or vehicle has its own HA integration (e.g. OCPP, or a
+vehicle-brand integration like Tesla/Polestar/etc.), you'll often get better
+results calling *its* start/stop-charging service instead of a plain switch —
+same trigger on `charging_desired`, different `action`. Either way,
+`charging_desired` turning `off` mid-session — whether because the schedule
+finished, you hit [Stop](#daily-use), or you set the
+[charge override](#daily-use) to Force Off — is exactly the signal that
+should stop the physical charge; there's nothing extra to wire up for that.
+
+## What this doesn't do for you
+
+This integration only ever computes **when** to charge and exposes that as
+`charging_desired` plus the tuning entities in [Daily use](#daily-use). It
+deliberately doesn't know anything about your specific charger or car:
+starting/stopping the physical charge, reading battery %, or tracking session
+state (plugged in, paused, complete). Charger and vehicle integrations vary
+too much between brands to model that generically here, so those bits are
+left to your own automations. The two most common gaps to fill:
+
+**Setting ready-by.** Everyone's routine is different, and when the car gets
+plugged in on a given day changes what "ready by" should mean — this isn't
+something the integration can guess. The built-in default (next 7am,
+auto-rolling — see [Daily use](#daily-use)) already covers the common "same
+time every day" case with zero automation needed. Only automate this if your
+ready-by genuinely varies, e.g.:
+
+```yaml
+automation:
+  - alias: "Set EV ready-by from tomorrow's calendar event"
+    trigger:
+      - platform: state
+        entity_id: binary_sensor.car_plugged_in
+        to: "on"
+    action:
+      - service: datetime.set_value
+        target:
+          entity_id: datetime.wholesale_ev_schedule_ready_by
+        data:
+          datetime: "{{ states('input_datetime.next_departure') }}"
+```
+
+Trigger on whatever signals "the car just got plugged in" for your setup, and
+source the target time from wherever you already track it — a calendar
+entity, an `input_datetime` you maintain yourself, or (for a genuinely fixed
+routine) a literal time.
+
+**Setting charging hours required.** As the issue that prompted this section
+puts it, this logic is too vehicle-specific to build in. If your vehicle's HA
+integration exposes something usable — target charge %, current battery %, or
+an estimated "time to target" sensor — prefer wiring an automation off that
+over guessing:
+
+```yaml
+automation:
+  - alias: "Set EV charging hours from battery %"
+    trigger:
+      - platform: state
+        entity_id: binary_sensor.car_plugged_in
+        to: "on"
+    action:
+      - service: number.set_value
+        target:
+          entity_id: number.wholesale_ev_schedule_charging_hours_required
+        data:
+          value: >-
+            {{ ((80 - states('sensor.car_battery_percent') | float)
+                / 100 * 60 / 7) | round(1) }}
+```
+
+That example estimates hours as `(target% - current%) / 100 * battery_kWh /
+charger_kW` — adjust the numbers (target percentage, battery capacity,
+charger power) to match your car and charger. If your vehicle doesn't expose
+anything usable, a rough manual or static number is a reasonable fallback —
+this integration intentionally doesn't attempt this calculation itself, since
+it varies too much by vehicle/charger combination. Both examples above are
+illustrative patterns, not copy-paste-ready automations — the exact trigger
+and data source are unavoidably specific to your setup.
+
 ## Multiple cars
 
 Set up the integration again with a different name — each instance gets its
