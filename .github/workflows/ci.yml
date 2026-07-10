@@ -15,8 +15,17 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
       - name: Build test image
-        run: docker build -t wholesale-ev-schedule-test .
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          tags: wholesale-ev-schedule-test:latest
+          load: true
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
 
       - name: Run test suite
         run: >
@@ -28,8 +37,17 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
       - name: Build test image
-        run: docker build -t wholesale-ev-schedule-test .
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          tags: wholesale-ev-schedule-test:latest
+          load: true
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
 
       - name: Ruff check
         run: docker run --rm wholesale-ev-schedule-test ruff check custom_components tests
@@ -42,8 +60,17 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
       - name: Build test image
-        run: docker build -t wholesale-ev-schedule-test .
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          tags: wholesale-ev-schedule-test:latest
+          load: true
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
 
       - name: Bandit (SAST)
         run: docker run --rm wholesale-ev-schedule-test bandit -r custom_components -c pyproject.toml
