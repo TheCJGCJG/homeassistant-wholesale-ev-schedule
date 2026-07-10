@@ -41,6 +41,44 @@ async def test_max_price_below_all_available_rates_is_unschedulable(hass):
     assert "max_price" in coordinator.data["error_reason"]
 
 
+async def test_unschedulable_reason_blames_ready_by_when_thats_the_actual_cause(hass):
+    # Regression for issue #26. Plenty of cheap data is available, but
+    # ready_by (1h away) leaves less time than required_hours (3h) -- the
+    # reason should say so, not blame max_price/min_block_hours which are
+    # both left at their defaults and aren't the actual cause.
+    entry = await async_setup_wholesale_entry(hass)
+    coordinator = hass.data[DOMAIN][entry.entry_id]
+
+    now = dt_util.now()
+    set_octopus_rate_entity(hass, CURRENT_RATES_ENTITY, octopus_rate_points(now, 12, 0.10))
+    set_octopus_rate_entity(hass, NEXT_RATES_ENTITY, [])
+
+    await _schedule_after(hass, coordinator, ready_in_hours=1, required_hours=3.0)
+
+    assert coordinator.data["state"] == "unschedulable"
+    assert "ready_by" in coordinator.data["error_reason"]
+    assert "max_price" not in coordinator.data["error_reason"]
+
+
+async def test_unschedulable_reason_blames_missing_data_when_thats_the_actual_cause(hass):
+    # Regression for issue #26. ready_by is far enough out and tolerances are
+    # loose enough that neither is the real cause -- only 1h of price data
+    # has been published so far against a 3h requirement, so the reason
+    # should say so.
+    entry = await async_setup_wholesale_entry(hass)
+    coordinator = hass.data[DOMAIN][entry.entry_id]
+
+    now = dt_util.now()
+    set_octopus_rate_entity(hass, CURRENT_RATES_ENTITY, octopus_rate_points(now, 2, 0.10))
+    set_octopus_rate_entity(hass, NEXT_RATES_ENTITY, [])
+
+    await _schedule_after(hass, coordinator, ready_in_hours=5, required_hours=3.0)
+
+    assert coordinator.data["state"] == "unschedulable"
+    assert "price data" in coordinator.data["error_reason"]
+    assert "max_price" not in coordinator.data["error_reason"]
+
+
 async def test_min_block_hours_relaxes_when_longer_than_required(hass):
     # min_block_hours (2h) longer than required_hours (1h) must relax to a
     # single contiguous block rather than making the request unschedulable.

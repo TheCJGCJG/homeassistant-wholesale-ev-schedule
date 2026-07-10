@@ -448,7 +448,7 @@ class WholesaleEvScheduleCoordinator(DataUpdateCoordinator[dict]):
         sessions = self._compute_sessions(all_prices, now_dt)
         self._stored_sessions = sessions
         await self._async_save_stored_state()
-        return self._schedule_result(sessions, now_dt, price_summary)
+        return self._schedule_result(sessions, now_dt, price_summary, all_prices)
 
     def _with_diagnostics(self, result: dict, price_summary: dict) -> dict:
         result["price_summary"] = price_summary
@@ -515,15 +515,44 @@ class WholesaleEvScheduleCoordinator(DataUpdateCoordinator[dict]):
             price_summary,
         )
 
-    def _schedule_result(self, sessions: list[dict], now_dt: datetime, price_summary: dict) -> dict:
+    def _unschedulable_reason(self, now_dt: datetime, all_prices: list[dict]) -> str:
+        """Best-effort diagnosis of *why* no valid schedule was found. Checked in
+        order of how likely each is to be the actual cause: ready_by leaving less
+        time than required, then not enough price data published yet before
+        ready_by, falling back to the tolerances only once both of those are ruled
+        out -- see issue #26 (this used to always blame tolerances regardless)."""
+        hours_until_ready_by = max(0.0, (self.ready_by - now_dt).total_seconds() / 3600) if self.ready_by else 0.0
+        if self.required_hours > hours_until_ready_by:
+            ready_by_label = self.ready_by.isoformat() if self.ready_by else "unset"
+            return (
+                f"ready_by ({ready_by_label}) leaves only {hours_until_ready_by:.1f}h, "
+                f"less than the {self.required_hours}h required"
+            )
+
+        required_slots = max(1, math.ceil(self.required_hours * 2))
+        if self.ready_by:
+            eligible_count = sum(1 for p in all_prices if p["date_time"] + timedelta(minutes=30) <= self.ready_by)
+        else:
+            eligible_count = len(all_prices)
+        if eligible_count < required_slots:
+            return (
+                f"Not enough price data published yet before ready_by: "
+                f"{eligible_count} half-hour slots available, {required_slots} needed"
+            )
+
+        return (
+            f"No slots satisfy constraints: {self.required_hours}h needed, "
+            f"max_price={self.max_price}/kWh, min_block_hours={self.min_block_hours}h"
+        )
+
+    def _schedule_result(
+        self, sessions: list[dict], now_dt: datetime, price_summary: dict, all_prices: list[dict]
+    ) -> dict:
         active, future = prune_and_classify(sessions, now_dt)
         hours_remaining = compute_hours_remaining(future, active, now_dt)
 
         if not sessions and active is None and self.required_hours > 0:
-            reason = (
-                f"No slots satisfy constraints: {self.required_hours}h needed, "
-                f"max_price={self.max_price}/kWh, min_block_hours={self.min_block_hours}h"
-            )
+            reason = self._unschedulable_reason(now_dt, all_prices)
             return self._with_diagnostics(
                 {
                     "state": STATE_UNSCHEDULABLE,
