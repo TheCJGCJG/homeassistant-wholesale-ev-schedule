@@ -268,4 +268,5 @@ side by side without clashing.
 ## Contributing / technical details
 
 See [DEVELOPING.md](DEVELOPING.md) for the file structure, architecture
-notes, how to add a new price provider, and how to run the test suite.
+notes, how to add a new price provider, and how to run the test suite. If
+you're an AI coding agent, start at [AGENTS.md](AGENTS.md) instead.
