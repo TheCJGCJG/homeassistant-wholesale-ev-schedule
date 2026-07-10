@@ -6,6 +6,8 @@ import math
 from datetime import timedelta
 
 import homeassistant.util.dt as dt_util
+import pytest
+from homeassistant.exceptions import ServiceValidationError
 
 from custom_components.wholesale_ev_schedule.const import DEFAULT_READY_BY_HOUR, DOMAIN
 
@@ -290,6 +292,32 @@ async def test_stored_min_block_hours_as_none_degrades_to_default_instead_of_cra
     await coordinator.async_load_stored_state()
 
     assert coordinator.min_block_hours == coordinator._default_min_block_hours
+
+
+async def test_nan_via_number_set_value_is_rejected_instead_of_bricking_the_entry(hass):
+    # Regression for issue #37. HA's own number-entity min/max guard silently
+    # lets NaN through (`nan < min`/`nan > max` are both False), so without a
+    # guard in the coordinator setter, a NaN persisted via _async_save_stored_state
+    # serializes to JSON `null`, which on the next load becomes None and
+    # crashes downstream arithmetic -- leaving the whole config entry stuck
+    # retrying setup, not just this cycle's update.
+    entry = await async_setup_wholesale_entry(hass)
+    coordinator = hass.data[DOMAIN][entry.entry_id]
+    required_hours_before = coordinator.required_hours
+
+    with pytest.raises(ServiceValidationError):
+        await hass.services.async_call(
+            "number",
+            "set_value",
+            {"entity_id": "number.wholesale_ev_schedule_charging_hours_required", "value": float("nan")},
+            blocking=True,
+        )
+
+    # Rejected before being assigned -- required_hours is untouched, and a
+    # reload must behave normally (not get stuck retrying setup).
+    assert coordinator.required_hours == required_hours_before
+    await coordinator.async_load_stored_state()
+    assert coordinator.required_hours == required_hours_before
 
 
 async def test_ready_by_in_the_past_rolls_forward_instead_of_erroring(hass):

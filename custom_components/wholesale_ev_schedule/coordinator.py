@@ -10,6 +10,7 @@ import homeassistant.util.dt as dt_util
 from homeassistant.config_entries import ConfigEntry
 from homeassistant.const import CONF_NAME
 from homeassistant.core import HomeAssistant
+from homeassistant.exceptions import ServiceValidationError
 from homeassistant.helpers.storage import Store
 from homeassistant.helpers.update_coordinator import DataUpdateCoordinator
 from homeassistant.util import slugify
@@ -279,27 +280,42 @@ class WholesaleEvScheduleCoordinator(DataUpdateCoordinator[dict]):
         await self._async_save_stored_state()
         await self.async_refresh()
 
+    def _reject_non_finite(self, value: float, field_name: str) -> None:
+        """Raise if `value` isn't finite. HA's own number-entity min/max guard
+        silently lets NaN through (`nan < min` and `nan > max` are both False),
+        so this is the last line of defense before persisting it -- a
+        persisted NaN serializes to JSON `null` via orjson, and on the next
+        reload that becomes None and crashes downstream arithmetic, leaving
+        the whole config entry stuck in ConfigEntryState.SETUP_RETRY (#37)."""
+        if not math.isfinite(value):
+            raise ServiceValidationError(f"{field_name} must be a finite number, got {value!r}")
+
     async def async_set_required_hours(self, value: float) -> None:
+        self._reject_non_finite(value, "required_hours")
         self.required_hours = value
         await self._async_save_stored_state()
         await self.async_refresh()
 
     async def async_set_gamble_tolerance(self, value: float) -> None:
+        self._reject_non_finite(value, "gamble_tolerance")
         self.gamble_tolerance = value
         await self._async_save_stored_state()
         await self.async_refresh()
 
     async def async_set_min_block_hours(self, value: float) -> None:
+        self._reject_non_finite(value, "min_block_hours")
         self.min_block_hours = value
         await self._async_save_stored_state()
         await self.async_refresh()
 
     async def async_set_max_price(self, value: float) -> None:
+        self._reject_non_finite(value, "max_price")
         self.max_price = value
         await self._async_save_stored_state()
         await self.async_refresh()
 
     async def async_set_assumed_charge_kwh(self, value: float) -> None:
+        self._reject_non_finite(value, "assumed_charge_kwh")
         self.assumed_charge_kwh = value
         await self._async_save_stored_state()
         await self.async_refresh()
