@@ -137,13 +137,40 @@ All tests run inside Docker (`public.ecr.aws/docker/library/python:trixie`):
 - `tests/test_estimated_cost.py` — next-slot average price and the estimated-cost sensor derived from it via assumed_charge_kwh, including live updates when the number changes, persistence, and reset restoring its default
 - `tests/test_minute_tick.py` — the wall-clock-aligned minute tick (`async_track_time_change` in `__init__.py`) triggers a coordinator refresh at the next :00 second boundary well before a full `update_interval_minutes` has elapsed, and its listener is torn down on unload
 
+## Linting and security scanning
+
+Also run inside Docker, config lives in `pyproject.toml`:
+
+```bash
+make lint           # ruff check — unused imports, import order, bugbear/pyupgrade/simplify rules
+make format          # ruff format — apply the formatter
+make format-check    # ruff format --check — fail if anything's unformatted
+make security        # bandit (SAST on custom_components/) + pip-audit (dependency CVEs)
+make check           # test + lint + format-check + security, all of the above
+```
+
+`ruff`'s lint rules (`E`/`F`/`W`/`I`/`B`/`UP`/`SIM`/`C4`) are enforced in CI via
+the `lint` job. `bandit`/`pip-audit` and `format-check` are available locally
+via `make security` / `make format-check` but aren't a CI gate yet.
+
 ## CI / releases
 
-`.github/workflows/ci.yml` runs the Docker test suite on every push/PR to
-`main`, and publishes a GitHub release (zipping `custom_components/wholesale_ev_schedule/`)
-whenever `manifest.json`'s `version` changes and doesn't already have a
+`.github/workflows/ci.yml` runs the Docker test suite and the ruff lint check
+on every push/PR to `main`, and publishes a GitHub release (zipping
+`custom_components/wholesale_ev_schedule/`) whenever `manifest.json`'s
+`version` changes and doesn't already have a
 matching tag — so bumping the version is what triggers a release, not every
 commit.
+
+Three more workflows run alongside it:
+- `.github/workflows/codeql.yml` — GitHub CodeQL SAST scan on every push/PR to
+  `main` plus a weekly schedule; findings show up in the repo's Security tab,
+  not as a failing check here.
+- `.github/workflows/validate.yml` — `home-assistant/actions/hassfest` (manifest
+  schema, HA integration conventions) and `hacs/action` (HACS distribution
+  requirements), on the same push/PR/weekly triggers.
+- `.github/dependabot.yml` — weekly automated PRs for both `pip` (the
+  `requirements-*.txt` files) and `github-actions` dependencies.
 
 ## Brand images
 

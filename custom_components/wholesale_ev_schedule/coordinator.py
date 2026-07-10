@@ -1,17 +1,17 @@
 """Data update coordinator for Wholesale EV Schedule."""
 from __future__ import annotations
 
-from datetime import datetime, timedelta
 import logging
 import math
+from datetime import datetime, timedelta
 
+import homeassistant.util.dt as dt_util
 from homeassistant.config_entries import ConfigEntry
 from homeassistant.const import CONF_NAME
 from homeassistant.core import HomeAssistant
 from homeassistant.helpers.storage import Store
 from homeassistant.helpers.update_coordinator import DataUpdateCoordinator
 from homeassistant.util import slugify
-import homeassistant.util.dt as dt_util
 
 from .const import (
     CHARGE_OVERRIDE_FORCE_OFF,
@@ -374,7 +374,9 @@ class WholesaleEvScheduleCoordinator(DataUpdateCoordinator[dict]):
         if active_session:
             duration_h = active_session.get("duration_hours")
             if duration_h is None:
-                duration_h = (parse_dt(active_session["end"]) - parse_dt(active_session["start"])).total_seconds() / 3600
+                end = parse_dt(active_session["end"])
+                start = parse_dt(active_session["start"])
+                duration_h = (end - start).total_seconds() / 3600
             slots_still_needed = max(0, required_slots - math.ceil(duration_h * 2))
 
         future_sessions = []

@@ -7,9 +7,9 @@ in isolation, same as the source project.
 """
 from __future__ import annotations
 
-from datetime import datetime, timedelta
 import logging
 import math
+from datetime import datetime, timedelta
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -260,9 +260,7 @@ def deduplicate_and_sort_prices(all_prices: list[dict], now_dt: datetime) -> lis
         dt = p["date_time"]
         is_actual = p["source"] in ("current_actual", "next_actual")
         existing = prices_by_dt.get(dt)
-        if existing is None:
-            prices_by_dt[dt] = p
-        elif is_actual and existing["source"] not in ("current_actual", "next_actual"):
+        if existing is None or is_actual and existing["source"] not in ("current_actual", "next_actual"):
             prices_by_dt[dt] = p
 
     result = []

@@ -5,11 +5,11 @@ that the pure scheduler.py unit tests can't see.
 """
 from datetime import timedelta
 
+import homeassistant.util.dt as dt_util
 from homeassistant import config_entries
 from homeassistant.const import CONF_NAME
 from homeassistant.data_entry_flow import FlowResultType
 from homeassistant.helpers import entity_registry as er
-import homeassistant.util.dt as dt_util
 
 from custom_components.wholesale_ev_schedule.const import DEFAULT_NAME, DOMAIN
 

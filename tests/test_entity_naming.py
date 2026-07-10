@@ -7,7 +7,7 @@ from homeassistant.util import slugify
 
 from custom_components.wholesale_ev_schedule.const import DOMAIN
 
-from .factories import EXPECTED_ENTITY_IDS, PYSCRIPT_ENTITY_IDS, async_setup_wholesale_entry, expected_entity_ids
+from .factories import EXPECTED_ENTITY_IDS, PYSCRIPT_ENTITY_IDS, async_setup_wholesale_entry
 
 
 async def test_no_entity_id_collides_with_pyscript_original(hass):

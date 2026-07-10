@@ -4,8 +4,8 @@ config-flow-only options.
 """
 from datetime import timedelta
 
-from homeassistant.helpers import entity_registry as er
 import homeassistant.util.dt as dt_util
+from homeassistant.helpers import entity_registry as er
 
 from custom_components.wholesale_ev_schedule.const import DOMAIN
 

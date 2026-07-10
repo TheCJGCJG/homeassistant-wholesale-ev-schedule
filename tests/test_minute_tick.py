@@ -11,9 +11,8 @@ of on the minute. This test proves a refresh happens at the very next :00
 second boundary, well before a full `update_interval_minutes` has elapsed."""
 from datetime import timedelta
 
-from pytest_homeassistant_custom_component.common import async_fire_time_changed
-
 import homeassistant.util.dt as dt_util
+from pytest_homeassistant_custom_component.common import async_fire_time_changed
 
 from custom_components.wholesale_ev_schedule.const import DOMAIN
 
