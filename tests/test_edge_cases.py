@@ -252,6 +252,46 @@ async def test_stored_session_list_containing_a_bare_string_is_discarded_instead
     assert coordinator._stored_sessions == [good_session]
 
 
+async def test_stored_required_hours_as_a_numeric_string_is_coerced_instead_of_crashing(hass):
+    # Regression for issue #35. required_hours was loaded via bare
+    # data.get(key, default) with no float() cast -- a stored numeric string
+    # (e.g. from a hand-edited store file) crashed the very next `<= 0`
+    # comparison in _async_update_data. A numeric string is coercible, so the
+    # fix is to actually use it (float("1.0") == 1.0), not fall back.
+    entry = await async_setup_wholesale_entry(hass)
+    coordinator = hass.data[DOMAIN][entry.entry_id]
+    await coordinator._store.async_save({"required_hours": "1.0"})
+
+    await coordinator.async_load_stored_state()
+
+    assert coordinator.required_hours == 1.0
+
+
+async def test_stored_required_hours_as_a_non_numeric_string_degrades_to_default_instead_of_crashing(hass):
+    # The genuinely-not-coercible case -- must fall back to the default
+    # rather than raise.
+    entry = await async_setup_wholesale_entry(hass)
+    coordinator = hass.data[DOMAIN][entry.entry_id]
+    await coordinator._store.async_save({"required_hours": "not-a-number"})
+
+    await coordinator.async_load_stored_state()
+
+    assert coordinator.required_hours == coordinator._default_required_hours
+
+
+async def test_stored_min_block_hours_as_none_degrades_to_default_instead_of_crashing(hass):
+    # Regression for issue #35. A stored explicit `null` (e.g. a partially
+    # written save) crashed inside scheduler.find_optimal_slots's
+    # `min_block_hours * 2` arithmetic instead of degrading.
+    entry = await async_setup_wholesale_entry(hass)
+    coordinator = hass.data[DOMAIN][entry.entry_id]
+    await coordinator._store.async_save({"min_block_hours": None})
+
+    await coordinator.async_load_stored_state()
+
+    assert coordinator.min_block_hours == coordinator._default_min_block_hours
+
+
 async def test_ready_by_in_the_past_rolls_forward_instead_of_erroring(hass):
     entry = await async_setup_wholesale_entry(hass)
     coordinator = hass.data[DOMAIN][entry.entry_id]

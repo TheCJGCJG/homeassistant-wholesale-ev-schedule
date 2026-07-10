@@ -180,12 +180,20 @@ class WholesaleEvScheduleCoordinator(DataUpdateCoordinator[dict]):
         self.ready_by = self._parse_stored_dt(data.get("ready_by"), "ready_by")
         if self.ready_by is None:
             self.ready_by = next_ready_by(dt_util.now(), self._default_ready_by_hour, self._default_ready_by_day_offset)
-        self.required_hours = data.get("required_hours", self._default_required_hours)
-        self.gamble_tolerance = data.get("gamble_tolerance", self._default_gamble_tolerance)
-        self.min_block_hours = data.get("min_block_hours", self._default_min_block_hours)
-        self.max_price = data.get("max_price", self._default_max_price)
+        self.required_hours = self._parse_stored_float(
+            data.get("required_hours"), self._default_required_hours, "required_hours"
+        )
+        self.gamble_tolerance = self._parse_stored_float(
+            data.get("gamble_tolerance"), self._default_gamble_tolerance, "gamble_tolerance"
+        )
+        self.min_block_hours = self._parse_stored_float(
+            data.get("min_block_hours"), self._default_min_block_hours, "min_block_hours"
+        )
+        self.max_price = self._parse_stored_float(data.get("max_price"), self._default_max_price, "max_price")
         self.charge_override = data.get("charge_override", DEFAULT_CHARGE_OVERRIDE)
-        self.assumed_charge_kwh = data.get("assumed_charge_kwh", DEFAULT_ASSUMED_CHARGE_KWH)
+        self.assumed_charge_kwh = self._parse_stored_float(
+            data.get("assumed_charge_kwh"), DEFAULT_ASSUMED_CHARGE_KWH, "assumed_charge_kwh"
+        )
         self._stored_sessions = self._sanitize_stored_sessions(data.get("sessions", []))
         self._boost_end = self._parse_stored_dt(data.get("boost_end"), "boost_end")
         await self._async_save_stored_state()
@@ -223,6 +231,19 @@ class WholesaleEvScheduleCoordinator(DataUpdateCoordinator[dict]):
         except (TypeError, ValueError) as err:
             _LOGGER.warning("Stored %s %r is invalid (%s); treating as unset", field_name, value, err)
             return None
+
+    def _parse_stored_float(self, value, default: float, field_name: str) -> float:
+        """Coerce a stored numeric tuning value to float, degrading to `default`
+        (rather than raising downstream, e.g. `if self.required_hours <= 0` or
+        scheduler.py arithmetic on a str/None) if it's missing or not coercible
+        -- see issue #35."""
+        if value is None:
+            return default
+        try:
+            return float(value)
+        except (TypeError, ValueError) as err:
+            _LOGGER.warning("Stored %s %r is invalid (%s); using default %s", field_name, value, err, default)
+            return default
 
     async def _async_save_stored_state(self) -> None:
         await self._store.async_save(
