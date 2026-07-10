@@ -327,10 +327,18 @@ class WholesaleEvScheduleCoordinator(DataUpdateCoordinator[dict]):
                 if dt_val is None or price_val is None:
                     continue
                 slot_dt = dt_util.as_local(parse_dt(dt_val))
+                raw_price = float(price_val)
+                # float() accepts the strings "nan"/"inf" without error (unlike
+                # "N/A", which correctly raises below) -- treat as malformed the
+                # same way rather than silently poisoning downstream min/max/sum
+                # diagnostics and ranking, since NaN's comparison semantics make
+                # it not reliably sort to the back (issue #33).
+                if not math.isfinite(raw_price):
+                    raise ValueError(f"non-finite price: {price_val!r}")
                 slots.append(
                     {
                         "date_time": slot_dt,
-                        "raw_price": round(float(price_val) * multiplier, 4),
+                        "raw_price": round(raw_price * multiplier, 4),
                         "source": source_label,
                     }
                 )
@@ -361,10 +369,14 @@ class WholesaleEvScheduleCoordinator(DataUpdateCoordinator[dict]):
                 if dt_str is None or price_val is None:
                     continue
                 slot_dt = dt_util.as_local(parse_dt(dt_str))
+                raw_price = float(price_val)
+                # See _parse_rate_entity -- reject non-finite floats (issue #33).
+                if not math.isfinite(raw_price):
+                    raise ValueError(f"non-finite price: {price_val!r}")
                 slots.append(
                     {
                         "date_time": slot_dt,
-                        "raw_price": round(float(price_val) * multiplier, 4),
+                        "raw_price": round(raw_price * multiplier, 4),
                         "source": "predicted",
                     }
                 )

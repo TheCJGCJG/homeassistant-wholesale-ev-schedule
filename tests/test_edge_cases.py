@@ -2,6 +2,7 @@
 in-progress session surviving a price refresh, and a boost expiring naturally
 (as opposed to being cancelled via the button)."""
 
+import math
 from datetime import timedelta
 
 import homeassistant.util.dt as dt_util
@@ -129,6 +130,59 @@ async def test_rate_attribute_containing_bare_strings_is_skipped_not_crashed(has
 
     assert coordinator.last_update_success is True
     assert coordinator.data["state"] in ("error", "unschedulable")
+
+
+async def test_nan_price_value_is_skipped_not_silently_poisoning_diagnostics(hass):
+    # Regression for issue #33. float() accepts the strings "nan"/"inf"
+    # without error (unlike "not-a-number", already covered above) -- must be
+    # rejected the same way, not silently poison min/max/average price
+    # diagnostics or scheduling ranking via NaN's broken comparison
+    # semantics.
+    entry = await async_setup_wholesale_entry(hass)
+    coordinator = hass.data[DOMAIN][entry.entry_id]
+
+    now = dt_util.now()
+    points = octopus_rate_points(now, 6, 0.05)
+    points[2]["value_inc_vat"] = "nan"
+    set_octopus_rate_entity(hass, CURRENT_RATES_ENTITY, points)
+    set_octopus_rate_entity(hass, NEXT_RATES_ENTITY, [])
+
+    await coordinator.async_set_ready_by(now + timedelta(hours=3))
+    await coordinator.async_set_required_hours(1.0)
+    await hass.async_block_till_done()
+
+    assert coordinator.last_update_success is True
+    price_summary = coordinator.data["price_summary"]
+    assert price_summary["count"] == 5  # the nan point was skipped, not counted
+    assert price_summary["average_price"] == price_summary["average_price"]  # not NaN (NaN != NaN)
+    assert price_summary["cheapest_price"] == price_summary["cheapest_price"]
+    assert price_summary["most_expensive_price"] == price_summary["most_expensive_price"]
+
+
+async def test_infinite_forecast_price_value_is_skipped_not_silently_poisoning_diagnostics(hass):
+    # Regression for issue #33, forecast side.
+    entry = await async_setup_wholesale_entry(hass)
+    coordinator = hass.data[DOMAIN][entry.entry_id]
+
+    now = dt_util.now()
+    set_octopus_rate_entity(hass, CURRENT_RATES_ENTITY, octopus_rate_points(now, 6, 0.05))
+    set_octopus_rate_entity(hass, NEXT_RATES_ENTITY, [])
+    forecast_points = [
+        {"date_time": (now + timedelta(minutes=30 * i)).isoformat(), "agile_pred": 3.0} for i in range(6)
+    ]
+    forecast_points[3]["agile_pred"] = "inf"
+    hass.states.async_set(FORECAST_ENTITY, "populated", {"prices": forecast_points})
+
+    await coordinator.async_set_ready_by(now + timedelta(hours=3))
+    await coordinator.async_set_required_hours(1.0)
+    await hass.async_block_till_done()
+
+    assert coordinator.last_update_success is True
+    price_summary = coordinator.data["price_summary"]
+    assert price_summary["count"] == 11  # the infinite forecast point was skipped, not counted
+    assert math.isfinite(price_summary["average_price"])
+    assert math.isfinite(price_summary["cheapest_price"])
+    assert math.isfinite(price_summary["most_expensive_price"])
 
 
 async def test_malformed_stored_ready_by_degrades_to_default_instead_of_crashing(hass):
