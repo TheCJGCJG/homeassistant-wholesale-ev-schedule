@@ -7,3 +7,27 @@ services:
       - ./pytest.ini:/app/pytest.ini
     environment:
       - PYTHONUNBUFFERED=1
+
+  lint:
+    build: .
+    volumes:
+      - ./custom_components:/app/custom_components
+      - ./tests:/app/tests
+      - ./pyproject.toml:/app/pyproject.toml
+    command: ruff check custom_components tests
+
+  format-check:
+    build: .
+    volumes:
+      - ./custom_components:/app/custom_components
+      - ./tests:/app/tests
+      - ./pyproject.toml:/app/pyproject.toml
+    command: ruff format --check custom_components tests
+
+  security:
+    build: .
+    volumes:
+      - ./custom_components:/app/custom_components
+      - ./pyproject.toml:/app/pyproject.toml
+    command: >
+      bash -c "bandit -r custom_components -c pyproject.toml && pip-audit"

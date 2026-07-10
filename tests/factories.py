@@ -1,6 +1,7 @@
 """Shared fixtures/constants for setting up a Wholesale EV Schedule config entry
 in tests without repeating the full options dict or walking the whole config
 flow everywhere."""
+
 from datetime import datetime, timedelta
 
 from homeassistant.const import CONF_NAME
@@ -102,18 +103,36 @@ FULL_OPTIONS = {
 
 _ENTITY_SUFFIXES = {
     "sensor": [
-        "charging_state", "charging_schedule", "next_slot_start", "next_slot_end",
-        "next_slot_average_price", "next_slot_estimated_cost",
-        "hours_remaining", "time_remaining", "boost_ends_at", "block_count",
-        "upcoming_block_2_start", "upcoming_block_2_end",
-        "upcoming_block_3_start", "upcoming_block_3_end",
-        "candidate_price_points", "cheapest_available_price", "most_expensive_available_price",
-        "average_price_next_24h", "average_price_all_data", "price_data_sources", "active_providers",
+        "charging_state",
+        "charging_schedule",
+        "next_slot_start",
+        "next_slot_end",
+        "next_slot_average_price",
+        "next_slot_estimated_cost",
+        "hours_remaining",
+        "time_remaining",
+        "boost_ends_at",
+        "block_count",
+        "upcoming_block_2_start",
+        "upcoming_block_2_end",
+        "upcoming_block_3_start",
+        "upcoming_block_3_end",
+        "candidate_price_points",
+        "cheapest_available_price",
+        "most_expensive_available_price",
+        "average_price_next_24h",
+        "average_price_all_data",
+        "price_data_sources",
+        "active_providers",
     ],
     "binary_sensor": ["charging_desired"],
     "number": [
-        "charging_hours_required", "boost_duration_hours",
-        "gamble_tolerance", "min_block_hours", "max_price", "assumed_charge_kwh",
+        "charging_hours_required",
+        "boost_duration_hours",
+        "gamble_tolerance",
+        "min_block_hours",
+        "max_price",
+        "assumed_charge_kwh",
     ],
     "datetime": ["ready_by"],
     "select": ["charge_override"],
@@ -123,11 +142,7 @@ _ENTITY_SUFFIXES = {
 
 def expected_entity_ids(prefix: str = slugify(DEFAULT_NAME)) -> set[str]:
     """Every entity_id a config entry with this name's slug should register."""
-    return {
-        f"{platform}.{prefix}_{suffix}"
-        for platform, suffixes in _ENTITY_SUFFIXES.items()
-        for suffix in suffixes
-    }
+    return {f"{platform}.{prefix}_{suffix}" for platform, suffixes in _ENTITY_SUFFIXES.items() for suffix in suffixes}
 
 
 # Every entity_id this integration creates must start with this prefix — the

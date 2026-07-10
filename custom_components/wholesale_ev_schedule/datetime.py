@@ -1,4 +1,5 @@
 """Live-adjustable datetime input for Wholesale EV Schedule."""
+
 from __future__ import annotations
 
 from datetime import datetime

@@ -1,6 +1,7 @@
 """Next-slot average price and the estimated-cost sensor derived from it via
 the assumed_charge_kwh live number entity.
 """
+
 from datetime import timedelta
 
 import homeassistant.util.dt as dt_util
@@ -59,7 +60,8 @@ async def test_estimated_cost_updates_when_assumed_charge_kwh_changes(hass):
     await _schedule_after(hass, coordinator, ready_in_hours=3, required_hours=1.0)
 
     await hass.services.async_call(
-        "number", "set_value",
+        "number",
+        "set_value",
         {"entity_id": "number.wholesale_ev_schedule_assumed_charge_kwh", "value": 10.0},
         blocking=True,
     )
@@ -86,7 +88,8 @@ async def test_assumed_charge_kwh_persists_via_coordinator(hass):
     coordinator = hass.data[DOMAIN][entry.entry_id]
 
     await hass.services.async_call(
-        "number", "set_value",
+        "number",
+        "set_value",
         {"entity_id": "number.wholesale_ev_schedule_assumed_charge_kwh", "value": 22.5},
         blocking=True,
     )

@@ -1,5 +1,6 @@
 """Boost and stop lifecycle: number.set_value / button.press against a real
 config entry setup."""
+
 from datetime import timedelta
 
 import homeassistant.util.dt as dt_util
@@ -21,7 +22,8 @@ async def test_boost_number_starts_boost_and_self_resets(hass):
     entry = await async_setup_wholesale_entry(hass)
 
     await hass.services.async_call(
-        "number", "set_value",
+        "number",
+        "set_value",
         {"entity_id": "number.wholesale_ev_schedule_boost_duration_hours", "value": 2.0},
         blocking=True,
     )
@@ -45,7 +47,8 @@ async def test_boost_cancel_button_ends_boost(hass):
     assert coordinator.data["state"] == "boosting"
 
     await hass.services.async_call(
-        "button", "press",
+        "button",
+        "press",
         {"entity_id": "button.wholesale_ev_schedule_boost_cancel"},
         blocking=True,
     )
@@ -64,7 +67,8 @@ async def test_stop_button_clears_schedule_and_boost(hass):
     assert coordinator.data["state"] == "boosting"
 
     await hass.services.async_call(
-        "button", "press",
+        "button",
+        "press",
         {"entity_id": "button.wholesale_ev_schedule_stop"},
         blocking=True,
     )
@@ -86,7 +90,8 @@ async def test_stop_button_does_not_clear_ready_by(hass):
     await coordinator.async_set_required_hours(2.0)
 
     await hass.services.async_call(
-        "button", "press",
+        "button",
+        "press",
         {"entity_id": "button.wholesale_ev_schedule_stop"},
         blocking=True,
     )
@@ -111,7 +116,8 @@ async def test_reset_button_restores_every_default(hass):
 
     before_reset = dt_util.now()
     await hass.services.async_call(
-        "button", "press",
+        "button",
+        "press",
         {"entity_id": "button.wholesale_ev_schedule_reset"},
         blocking=True,
     )

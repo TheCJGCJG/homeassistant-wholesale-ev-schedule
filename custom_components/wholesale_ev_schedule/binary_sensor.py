@@ -1,4 +1,5 @@
 """Output binary sensor for Wholesale EV Schedule."""
+
 from __future__ import annotations
 
 from homeassistant.components.binary_sensor import BinarySensorEntity

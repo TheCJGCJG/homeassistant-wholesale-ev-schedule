@@ -4,9 +4,9 @@
   "codeowners": ["@TheCJGCJG"],
   "config_flow": true,
   "documentation": "https://github.com/TheCJGCJG/homeassistant-wholesale-ev-schedule",
-  "issue_tracker": "https://github.com/TheCJGCJG/homeassistant-wholesale-ev-schedule/issues",
   "integration_type": "hub",
   "iot_class": "local_polling",
+  "issue_tracker": "https://github.com/TheCJGCJG/homeassistant-wholesale-ev-schedule/issues",
   "requirements": [],
   "version": "0.7.0"
 }

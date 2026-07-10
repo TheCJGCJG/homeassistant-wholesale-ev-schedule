@@ -3,13 +3,14 @@
 These catch import errors, schema mistakes, and setup/entity-registration bugs
 that the pure scheduler.py unit tests can't see.
 """
+
 from datetime import timedelta
 
+import homeassistant.util.dt as dt_util
 from homeassistant import config_entries
 from homeassistant.const import CONF_NAME
 from homeassistant.data_entry_flow import FlowResultType
 from homeassistant.helpers import entity_registry as er
-import homeassistant.util.dt as dt_util
 
 from custom_components.wholesale_ev_schedule.const import DEFAULT_NAME, DOMAIN
 
@@ -24,15 +25,11 @@ from .factories import (
 
 
 async def test_config_flow_walks_all_steps_and_creates_entry(hass):
-    result = await hass.config_entries.flow.async_init(
-        DOMAIN, context={"source": config_entries.SOURCE_USER}
-    )
+    result = await hass.config_entries.flow.async_init(DOMAIN, context={"source": config_entries.SOURCE_USER})
     assert result["type"] == FlowResultType.FORM
     assert result["step_id"] == "user"
 
-    result = await hass.config_entries.flow.async_configure(
-        result["flow_id"], {**BASE_INPUT, CONF_NAME: DEFAULT_NAME}
-    )
+    result = await hass.config_entries.flow.async_configure(result["flow_id"], {**BASE_INPUT, CONF_NAME: DEFAULT_NAME})
     assert result["type"] == FlowResultType.FORM
     assert result["step_id"] == "rates_octopus_energy"
 

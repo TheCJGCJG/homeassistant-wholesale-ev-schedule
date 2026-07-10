@@ -1,6 +1,7 @@
 """Edge cases: malformed price data, ready_by already in the past, an
 in-progress session surviving a price refresh, and a boost expiring naturally
 (as opposed to being cancelled via the button)."""
+
 from datetime import timedelta
 
 import homeassistant.util.dt as dt_util
@@ -42,8 +43,7 @@ async def test_malformed_forecast_point_is_skipped_not_crashed(hass):
     set_octopus_rate_entity(hass, CURRENT_RATES_ENTITY, octopus_rate_points(now, 6, 0.05))
     set_octopus_rate_entity(hass, NEXT_RATES_ENTITY, [])
     forecast_points = [
-        {"date_time": (now + timedelta(minutes=30 * i)).isoformat(), "agile_pred": 3.0}
-        for i in range(6)
+        {"date_time": (now + timedelta(minutes=30 * i)).isoformat(), "agile_pred": 3.0} for i in range(6)
     ]
     forecast_points[3]["agile_pred"] = "not-a-number"  # malformed — must be skipped, not raise
     forecast_points[4] = {"date_time": None, "agile_pred": 3.0}  # missing datetime — must be skipped

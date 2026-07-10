@@ -19,12 +19,12 @@ purely from the schedule and the manual override, independent of any
 particular charger's own state, so this integration doesn't need to know
 anything about your charger brand.
 """
+
 from __future__ import annotations
 
 from typing import Any
 
 import voluptuous as vol
-
 from homeassistant.config_entries import ConfigEntry, ConfigFlow, OptionsFlow
 from homeassistant.const import CONF_NAME
 from homeassistant.core import callback
@@ -88,10 +88,12 @@ def _with_default(key: str, defaults: dict[str, Any], fallback: Any) -> vol.Requ
 
 
 def _provider_select(options: dict[str, dict]) -> selector.SelectSelector:
-    return selector.SelectSelector(selector.SelectSelectorConfig(
-        options=[selector.SelectOptionDict(value=k, label=v["label"]) for k, v in options.items()],
-        mode=selector.SelectSelectorMode.DROPDOWN,
-    ))
+    return selector.SelectSelector(
+        selector.SelectSelectorConfig(
+            options=[selector.SelectOptionDict(value=k, label=v["label"]) for k, v in options.items()],
+            mode=selector.SelectSelectorMode.DROPDOWN,
+        )
+    )
 
 
 # "Next day" (0) / "Next day + 1/2/3" — how many days ahead of "as soon as
@@ -99,11 +101,13 @@ def _provider_select(options: dict[str, dict]) -> selector.SelectSelector:
 # CONF_DEFAULT_READY_BY_DAY_OFFSET in const.py and scheduler.next_ready_by.
 # Option labels live in strings.json/translations under
 # selector.default_ready_by_day_offset.options.
-_READY_BY_DAY_OFFSET_SELECT = selector.SelectSelector(selector.SelectSelectorConfig(
-    options=["0", "1", "2", "3"],
-    mode=selector.SelectSelectorMode.DROPDOWN,
-    translation_key="default_ready_by_day_offset",
-))
+_READY_BY_DAY_OFFSET_SELECT = selector.SelectSelector(
+    selector.SelectSelectorConfig(
+        options=["0", "1", "2", "3"],
+        mode=selector.SelectSelectorMode.DROPDOWN,
+        translation_key="default_ready_by_day_offset",
+    )
+)
 
 
 def base_schema(defaults: dict[str, Any], include_name: bool) -> vol.Schema:
@@ -113,98 +117,102 @@ def base_schema(defaults: dict[str, Any], include_name: bool) -> vol.Schema:
         # entities named number.tesla_ev_schedule_*) so multiple instances of
         # this integration can run side by side without colliding.
         schema[vol.Required(CONF_NAME, default=defaults.get(CONF_NAME, DEFAULT_NAME))] = str
-    schema.update({
-        _with_default(
-            CONF_UPDATE_INTERVAL_MINUTES, defaults, DEFAULT_UPDATE_INTERVAL_MINUTES
-        ): selector.NumberSelector(
-            selector.NumberSelectorConfig(min=1, max=60, step=1, mode=selector.NumberSelectorMode.BOX)
-        ),
-        _with_default(CONF_RATES_PROVIDER, defaults, RATE_PROVIDER_OCTOPUS_ENERGY): _provider_select(RATE_PROVIDERS),
-        _with_default(
-            CONF_FORECAST_PROVIDER, defaults, FORECAST_PROVIDER_AGILE_PREDICT
-        ): _provider_select(FORECAST_PROVIDERS),
-        # Setup-time defaults: what a fresh install starts with and what the
-        # "Reset" button restores every live value to — not the live values
-        # themselves (see coordinator.py).
-        _with_default(
-            CONF_DEFAULT_REQUIRED_HOURS, defaults, DEFAULT_REQUIRED_HOURS
-        ): selector.NumberSelector(
-            selector.NumberSelectorConfig(min=0, max=24, step=0.5, mode=selector.NumberSelectorMode.BOX)
-        ),
-        _with_default(
-            CONF_DEFAULT_GAMBLE_TOLERANCE, defaults, DEFAULT_GAMBLE_TOLERANCE
-        ): selector.NumberSelector(
-            selector.NumberSelectorConfig(min=0, max=100, step=1, mode=selector.NumberSelectorMode.BOX)
-        ),
-        _with_default(CONF_DEFAULT_MAX_PRICE, defaults, DEFAULT_MAX_PRICE): selector.NumberSelector(
-            selector.NumberSelectorConfig(min=0, max=200, step=0.1, mode=selector.NumberSelectorMode.BOX)
-        ),
-        _with_default(
-            CONF_DEFAULT_MIN_BLOCK_HOURS, defaults, DEFAULT_MIN_BLOCK_HOURS
-        ): selector.NumberSelector(
-            selector.NumberSelectorConfig(min=0, max=24, step=0.5, mode=selector.NumberSelectorMode.BOX)
-        ),
-        _with_default(CONF_DEFAULT_READY_BY_HOUR, defaults, DEFAULT_READY_BY_HOUR): selector.NumberSelector(
-            selector.NumberSelectorConfig(min=0, max=23, step=1, mode=selector.NumberSelectorMode.BOX)
-        ),
-        vol.Required(
-            CONF_DEFAULT_READY_BY_DAY_OFFSET,
-            default=str(defaults.get(CONF_DEFAULT_READY_BY_DAY_OFFSET, DEFAULT_READY_BY_DAY_OFFSET)),
-        ): _READY_BY_DAY_OFFSET_SELECT,
-    })
+    schema.update(
+        {
+            _with_default(
+                CONF_UPDATE_INTERVAL_MINUTES, defaults, DEFAULT_UPDATE_INTERVAL_MINUTES
+            ): selector.NumberSelector(
+                selector.NumberSelectorConfig(min=1, max=60, step=1, mode=selector.NumberSelectorMode.BOX)
+            ),
+            _with_default(CONF_RATES_PROVIDER, defaults, RATE_PROVIDER_OCTOPUS_ENERGY): _provider_select(
+                RATE_PROVIDERS
+            ),
+            _with_default(CONF_FORECAST_PROVIDER, defaults, FORECAST_PROVIDER_AGILE_PREDICT): _provider_select(
+                FORECAST_PROVIDERS
+            ),
+            # Setup-time defaults: what a fresh install starts with and what the
+            # "Reset" button restores every live value to — not the live values
+            # themselves (see coordinator.py).
+            _with_default(CONF_DEFAULT_REQUIRED_HOURS, defaults, DEFAULT_REQUIRED_HOURS): selector.NumberSelector(
+                selector.NumberSelectorConfig(min=0, max=24, step=0.5, mode=selector.NumberSelectorMode.BOX)
+            ),
+            _with_default(CONF_DEFAULT_GAMBLE_TOLERANCE, defaults, DEFAULT_GAMBLE_TOLERANCE): selector.NumberSelector(
+                selector.NumberSelectorConfig(min=0, max=100, step=1, mode=selector.NumberSelectorMode.BOX)
+            ),
+            _with_default(CONF_DEFAULT_MAX_PRICE, defaults, DEFAULT_MAX_PRICE): selector.NumberSelector(
+                selector.NumberSelectorConfig(min=0, max=200, step=0.1, mode=selector.NumberSelectorMode.BOX)
+            ),
+            _with_default(CONF_DEFAULT_MIN_BLOCK_HOURS, defaults, DEFAULT_MIN_BLOCK_HOURS): selector.NumberSelector(
+                selector.NumberSelectorConfig(min=0, max=24, step=0.5, mode=selector.NumberSelectorMode.BOX)
+            ),
+            _with_default(CONF_DEFAULT_READY_BY_HOUR, defaults, DEFAULT_READY_BY_HOUR): selector.NumberSelector(
+                selector.NumberSelectorConfig(min=0, max=23, step=1, mode=selector.NumberSelectorMode.BOX)
+            ),
+            vol.Required(
+                CONF_DEFAULT_READY_BY_DAY_OFFSET,
+                default=str(defaults.get(CONF_DEFAULT_READY_BY_DAY_OFFSET, DEFAULT_READY_BY_DAY_OFFSET)),
+            ): _READY_BY_DAY_OFFSET_SELECT,
+        }
+    )
     return vol.Schema(schema)
 
 
 def rates_octopus_energy_schema(defaults: dict[str, Any]) -> vol.Schema:
-    return vol.Schema({
-        _required(CONF_CURRENT_RATES_ENTITY, defaults): selector.EntitySelector(
-            selector.EntitySelectorConfig(domain="event")
-        ),
-        _required(CONF_NEXT_RATES_ENTITY, defaults): selector.EntitySelector(
-            selector.EntitySelectorConfig(domain="event")
-        ),
-    })
+    return vol.Schema(
+        {
+            _required(CONF_CURRENT_RATES_ENTITY, defaults): selector.EntitySelector(
+                selector.EntitySelectorConfig(domain="event")
+            ),
+            _required(CONF_NEXT_RATES_ENTITY, defaults): selector.EntitySelector(
+                selector.EntitySelectorConfig(domain="event")
+            ),
+        }
+    )
 
 
 def rates_custom_schema(defaults: dict[str, Any]) -> vol.Schema:
-    return vol.Schema({
-        _required(CONF_CURRENT_RATES_ENTITY, defaults): selector.EntitySelector(
-            selector.EntitySelectorConfig(domain="event")
-        ),
-        _required(CONF_NEXT_RATES_ENTITY, defaults): selector.EntitySelector(
-            selector.EntitySelectorConfig(domain="event")
-        ),
-        _with_default(CONF_RATES_ATTRIBUTE, defaults, "rates"): str,
-        _with_default(CONF_RATE_START_KEY, defaults, "start"): str,
-        _with_default(CONF_RATE_VALUE_KEY, defaults, "value_inc_vat"): str,
-        _with_default(
-            CONF_RATE_UNIT_MULTIPLIER, defaults, DEFAULT_RATE_UNIT_MULTIPLIER
-        ): selector.NumberSelector(
-            selector.NumberSelectorConfig(min=0.01, max=1000, step=0.01, mode=selector.NumberSelectorMode.BOX)
-        ),
-    })
+    return vol.Schema(
+        {
+            _required(CONF_CURRENT_RATES_ENTITY, defaults): selector.EntitySelector(
+                selector.EntitySelectorConfig(domain="event")
+            ),
+            _required(CONF_NEXT_RATES_ENTITY, defaults): selector.EntitySelector(
+                selector.EntitySelectorConfig(domain="event")
+            ),
+            _with_default(CONF_RATES_ATTRIBUTE, defaults, "rates"): str,
+            _with_default(CONF_RATE_START_KEY, defaults, "start"): str,
+            _with_default(CONF_RATE_VALUE_KEY, defaults, "value_inc_vat"): str,
+            _with_default(CONF_RATE_UNIT_MULTIPLIER, defaults, DEFAULT_RATE_UNIT_MULTIPLIER): selector.NumberSelector(
+                selector.NumberSelectorConfig(min=0.01, max=1000, step=0.01, mode=selector.NumberSelectorMode.BOX)
+            ),
+        }
+    )
 
 
 def forecast_agile_predict_schema(defaults: dict[str, Any]) -> vol.Schema:
-    return vol.Schema({
-        _required(CONF_FORECAST_ENTITY, defaults): selector.EntitySelector(
-            selector.EntitySelectorConfig(domain="sensor")
-        ),
-    })
+    return vol.Schema(
+        {
+            _required(CONF_FORECAST_ENTITY, defaults): selector.EntitySelector(
+                selector.EntitySelectorConfig(domain="sensor")
+            ),
+        }
+    )
 
 
 def forecast_custom_schema(defaults: dict[str, Any]) -> vol.Schema:
-    return vol.Schema({
-        _required(CONF_FORECAST_ENTITY, defaults): selector.EntitySelector(
-            selector.EntitySelectorConfig(domain="sensor")
-        ),
-        _with_default(CONF_FORECAST_ATTRIBUTE, defaults, "prices"): str,
-        _with_default(CONF_FORECAST_DATETIME_KEY, defaults, "date_time"): str,
-        _with_default(CONF_FORECAST_PRICE_KEY, defaults, "agile_pred"): str,
-        _with_default(CONF_FORECAST_UNIT_MULTIPLIER, defaults, 1.0): selector.NumberSelector(
-            selector.NumberSelectorConfig(min=0.01, max=1000, step=0.01, mode=selector.NumberSelectorMode.BOX)
-        ),
-    })
+    return vol.Schema(
+        {
+            _required(CONF_FORECAST_ENTITY, defaults): selector.EntitySelector(
+                selector.EntitySelectorConfig(domain="sensor")
+            ),
+            _with_default(CONF_FORECAST_ATTRIBUTE, defaults, "prices"): str,
+            _with_default(CONF_FORECAST_DATETIME_KEY, defaults, "date_time"): str,
+            _with_default(CONF_FORECAST_PRICE_KEY, defaults, "agile_pred"): str,
+            _with_default(CONF_FORECAST_UNIT_MULTIPLIER, defaults, 1.0): selector.NumberSelector(
+                selector.NumberSelectorConfig(min=0.01, max=1000, step=0.01, mode=selector.NumberSelectorMode.BOX)
+            ),
+        }
+    )
 
 
 class _ProviderStepsMixin:
@@ -236,9 +244,7 @@ class _ProviderStepsMixin:
             state[CONF_RATE_UNIT_MULTIPLIER] = profile["unit_multiplier"]
             return await self._async_after_rates_step()
 
-        return self.async_show_form(
-            step_id="rates_octopus_energy", data_schema=rates_octopus_energy_schema(state)
-        )
+        return self.async_show_form(step_id="rates_octopus_energy", data_schema=rates_octopus_energy_schema(state))
 
     async def async_step_rates_custom(self, user_input: dict[str, Any] | None = None):
         state = self._provider_state()
@@ -269,9 +275,7 @@ class _ProviderStepsMixin:
             state[CONF_FORECAST_UNIT_MULTIPLIER] = profile["unit_multiplier"]
             return await self._async_finish(state)
 
-        return self.async_show_form(
-            step_id="forecast_agile_predict", data_schema=forecast_agile_predict_schema(state)
-        )
+        return self.async_show_form(step_id="forecast_agile_predict", data_schema=forecast_agile_predict_schema(state))
 
     async def async_step_forecast_custom(self, user_input: dict[str, Any] | None = None):
         state = self._provider_state()

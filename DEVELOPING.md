@@ -137,13 +137,61 @@ All tests run inside Docker (`public.ecr.aws/docker/library/python:trixie`):
 - `tests/test_estimated_cost.py` — next-slot average price and the estimated-cost sensor derived from it via assumed_charge_kwh, including live updates when the number changes, persistence, and reset restoring its default
 - `tests/test_minute_tick.py` — the wall-clock-aligned minute tick (`async_track_time_change` in `__init__.py`) triggers a coordinator refresh at the next :00 second boundary well before a full `update_interval_minutes` has elapsed, and its listener is torn down on unload
 
+## Linting and security scanning
+
+Also run inside Docker, config lives in `pyproject.toml`:
+
+```bash
+make lint           # ruff check — unused imports, import order, bugbear/pyupgrade/simplify rules
+make format          # ruff format — apply the formatter
+make format-check    # ruff format --check — fail if anything's unformatted
+make security        # bandit (SAST on custom_components/) + pip-audit (dependency CVEs)
+make check           # test + lint + format-check + security, all of the above
+```
+
+`ruff check`, `ruff format --check`, and `bandit` are all enforced in CI (see
+below) and must pass before merging. `pip-audit` runs in CI too, but only
+informationally (`continue-on-error`) — transitive-dependency CVEs are what
+`.github/dependabot.yml` is for; hand-pinning a transitive package to chase a
+clean `pip-audit` run isn't worth fighting pip's resolver over.
+
 ## CI / releases
 
-`.github/workflows/ci.yml` runs the Docker test suite on every push/PR to
-`main`, and publishes a GitHub release (zipping `custom_components/wholesale_ev_schedule/`)
-whenever `manifest.json`'s `version` changes and doesn't already have a
-matching tag — so bumping the version is what triggers a release, not every
-commit.
+`.github/workflows/ci.yml` runs everything Docker-based in a single `checks`
+job — `ruff check`, `ruff format --check`, `bandit` (all blocking), then the
+test suite, then `pip-audit` (informational only, `continue-on-error`).
+They're one job rather than separate `test`/`lint`/`security` jobs because
+they all run the same image: splitting them just meant paying for a separate
+runner boot + Buildx setup + cache round-trip per check on top of an
+identical build. Order is cheapest-first, so a lint failure exits before
+paying for a full pytest run. The image itself is built once via
+`docker/build-push-action` with the GitHub Actions cache backend
+(`cache-from`/`cache-to: type=gha`) rather than a plain `docker build` —
+without it, every run would pip-install the entire
+`pytest-homeassistant-custom-component` dependency tree from scratch, since
+GitHub-hosted runners start with no Docker layer cache. With it, only a
+`requirements-*.txt` change actually triggers a real rebuild. `runs-on:
+ubuntu-latest` is already GitHub's smallest/cheapest hosted runner — there's
+no smaller tier to drop to.
+
+`release` depends on `checks` and publishes a GitHub release (zipping
+`custom_components/wholesale_ev_schedule/`) whenever `manifest.json`'s
+`version` changes and doesn't already have a matching tag — so bumping the
+version is what triggers a release, not every commit.
+
+Two more workflows run alongside it:
+- `.github/workflows/validate.yml` — `home-assistant/actions/hassfest` (manifest
+  schema, HA integration conventions) and `hacs/action` (HACS distribution
+  requirements), on push/PR to `main` plus a weekly schedule.
+- `.github/dependabot.yml` — weekly automated PRs for both `pip` (the
+  `requirements-*.txt` files) and `github-actions` dependencies.
+
+CodeQL is deliberately *not* a workflow file here — this repo already has
+GitHub's default CodeQL setup enabled (Settings → Code security → Code
+scanning), which covers Python and GitHub Actions and runs without a
+workflow file or any of our own worker-minutes. Adding a custom
+`codeql.yml` alongside it produces a hard "configuration error" (the two
+setups conflict) rather than running twice.
 
 ## Brand images
 

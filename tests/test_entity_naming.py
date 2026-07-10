@@ -2,12 +2,13 @@
 running on the same HA instance (e.g. the pyscript-based original this was
 ported from), and between two instances of this integration itself.
 """
+
 from homeassistant.helpers import entity_registry as er
 from homeassistant.util import slugify
 
 from custom_components.wholesale_ev_schedule.const import DOMAIN
 
-from .factories import EXPECTED_ENTITY_IDS, PYSCRIPT_ENTITY_IDS, async_setup_wholesale_entry, expected_entity_ids
+from .factories import EXPECTED_ENTITY_IDS, PYSCRIPT_ENTITY_IDS, async_setup_wholesale_entry
 
 
 async def test_no_entity_id_collides_with_pyscript_original(hass):

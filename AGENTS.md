@@ -44,7 +44,10 @@ something that belongs in one of the docs below, edit that doc, not this one.
    `config_flow.py`'s schema changed.
 4. Add or extend tests — check DEVELOPING.md → Testing for which existing
    file already covers the area you're touching before adding a new one.
-5. Run the Docker test suite; it must pass before opening a PR.
+5. Run `make check` (test + lint + format-check + security) before opening a
+   PR — `test`, `lint`/`format-check`, and bandit (part of `security`) are all
+   CI gates; `pip-audit` findings are informational only (Dependabot handles
+   dependency CVEs) — see DEVELOPING.md → Linting and security scanning.
 6. Update README.md (user-facing behavior) and/or DEVELOPING.md
    (architecture/rationale) if the change affects either — docs drift is a
    real failure mode in a repo this size.
