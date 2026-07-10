@@ -18,7 +18,7 @@ jobs:
   checks:
     runs-on: ubuntu-latest # smallest/cheapest GitHub-hosted runner available
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@v3
@@ -59,7 +59,7 @@ jobs:
     permissions:
       contents: write
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
       - name: Read version from manifest.json
         id: version
