@@ -10,30 +10,13 @@ permissions:
   contents: read
 
 jobs:
-  test:
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-
-      - name: Set up Docker Buildx
-        uses: docker/setup-buildx-action@v3
-
-      - name: Build test image
-        uses: docker/build-push-action@v6
-        with:
-          context: .
-          tags: wholesale-ev-schedule-test:latest
-          load: true
-          cache-from: type=gha
-          cache-to: type=gha,mode=max
-
-      - name: Run test suite
-        run: >
-          docker run --rm wholesale-ev-schedule-test
-          pytest --cov=custom_components/wholesale_ev_schedule --cov-branch --cov-report=term-missing
-
-  lint:
-    runs-on: ubuntu-latest
+  # One job, one image build: ruff/bandit/pytest all run the same Docker image,
+  # so splitting them into separate jobs just meant three separate runners each
+  # paying for their own checkout + Buildx setup + cache round-trip on top of
+  # the same build. Cheapest/fastest checks run first so a lint failure exits
+  # before paying for a full pytest run.
+  checks:
+    runs-on: ubuntu-latest # smallest/cheapest GitHub-hosted runner available
     steps:
       - uses: actions/checkout@v4
 
@@ -55,25 +38,13 @@ jobs:
       - name: Ruff format --check
         run: docker run --rm wholesale-ev-schedule-test ruff format --check custom_components tests
 
-  security:
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-
-      - name: Set up Docker Buildx
-        uses: docker/setup-buildx-action@v3
-
-      - name: Build test image
-        uses: docker/build-push-action@v6
-        with:
-          context: .
-          tags: wholesale-ev-schedule-test:latest
-          load: true
-          cache-from: type=gha
-          cache-to: type=gha,mode=max
-
       - name: Bandit (SAST)
         run: docker run --rm wholesale-ev-schedule-test bandit -r custom_components -c pyproject.toml
+
+      - name: Run test suite
+        run: >
+          docker run --rm wholesale-ev-schedule-test
+          pytest --cov=custom_components/wholesale_ev_schedule --cov-branch --cov-report=term-missing
 
       - name: pip-audit (dependency CVEs)
         # Informational only: transitive-dependency CVEs are Dependabot's job
@@ -82,7 +53,7 @@ jobs:
         run: docker run --rm wholesale-ev-schedule-test pip-audit
 
   release:
-    needs: [test, lint, security]
+    needs: checks
     if: github.event_name == 'push' && github.ref == 'refs/heads/main'
     runs-on: ubuntu-latest
     permissions:

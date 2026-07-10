@@ -157,31 +157,41 @@ clean `pip-audit` run isn't worth fighting pip's resolver over.
 
 ## CI / releases
 
-`.github/workflows/ci.yml` has three jobs: `test` (the Docker test suite),
-`lint` (`ruff check` + `ruff format --check`), and `security` (`bandit`,
-blocking; `pip-audit`, informational only). All three build the same image
-via `docker/build-push-action` with the GitHub Actions cache backend
+`.github/workflows/ci.yml` runs everything Docker-based in a single `checks`
+job — `ruff check`, `ruff format --check`, `bandit` (all blocking), then the
+test suite, then `pip-audit` (informational only, `continue-on-error`).
+They're one job rather than separate `test`/`lint`/`security` jobs because
+they all run the same image: splitting them just meant paying for a separate
+runner boot + Buildx setup + cache round-trip per check on top of an
+identical build. Order is cheapest-first, so a lint failure exits before
+paying for a full pytest run. The image itself is built once via
+`docker/build-push-action` with the GitHub Actions cache backend
 (`cache-from`/`cache-to: type=gha`) rather than a plain `docker build` —
-without it, all three jobs would independently pip-install the entire
-`pytest-homeassistant-custom-component` dependency tree from scratch on every
-run, since GitHub-hosted runners start with no Docker layer cache. With it,
-only a `requirements-*.txt` change actually triggers a real rebuild; unrelated
-changes (e.g. editing `README.md`) reuse cached layers across all three jobs.
-All three run on every push/PR to `main`. `release` depends on all three and
-publishes a GitHub release (zipping `custom_components/wholesale_ev_schedule/`)
-whenever `manifest.json`'s `version` changes and doesn't already have a
-matching tag — so bumping the version is what triggers a release, not every
-commit.
+without it, every run would pip-install the entire
+`pytest-homeassistant-custom-component` dependency tree from scratch, since
+GitHub-hosted runners start with no Docker layer cache. With it, only a
+`requirements-*.txt` change actually triggers a real rebuild. `runs-on:
+ubuntu-latest` is already GitHub's smallest/cheapest hosted runner — there's
+no smaller tier to drop to.
 
-Three more workflows run alongside it:
-- `.github/workflows/codeql.yml` — GitHub CodeQL SAST scan on every push/PR to
-  `main` plus a weekly schedule; findings show up in the repo's Security tab,
-  not as a failing check here.
+`release` depends on `checks` and publishes a GitHub release (zipping
+`custom_components/wholesale_ev_schedule/`) whenever `manifest.json`'s
+`version` changes and doesn't already have a matching tag — so bumping the
+version is what triggers a release, not every commit.
+
+Two more workflows run alongside it:
 - `.github/workflows/validate.yml` — `home-assistant/actions/hassfest` (manifest
   schema, HA integration conventions) and `hacs/action` (HACS distribution
-  requirements), on the same push/PR/weekly triggers.
+  requirements), on push/PR to `main` plus a weekly schedule.
 - `.github/dependabot.yml` — weekly automated PRs for both `pip` (the
   `requirements-*.txt` files) and `github-actions` dependencies.
+
+CodeQL is deliberately *not* a workflow file here — this repo already has
+GitHub's default CodeQL setup enabled (Settings → Code security → Code
+scanning), which covers Python and GitHub Actions and runs without a
+workflow file or any of our own worker-minutes. Adding a custom
+`codeql.yml` alongside it produces a hard "configuration error" (the two
+setups conflict) rather than running twice.
 
 ## Brand images
 
