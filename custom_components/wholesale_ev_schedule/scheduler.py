@@ -10,7 +10,7 @@ from __future__ import annotations
 
 import logging
 import math
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -361,6 +361,13 @@ def next_ready_by(now_dt: datetime, hour: int = 7, min_day_offset: int = 0) -> d
     at setup time.
     """
     candidate = now_dt.replace(hour=hour, minute=0, second=0, microsecond=0) + timedelta(days=min_day_offset)
+    if candidate.tzinfo is not None:
+        # `replace()` does naive wall-clock arithmetic -- on a DST transition day
+        # where `hour` falls in the skipped "spring forward" gap (e.g. 1am->2am
+        # somewhere becomes 2am->3am), the result may be a local time that never
+        # occurred. Round-tripping through UTC snaps it to the real local time
+        # at that instant instead of silently keeping an invalid offset (#27).
+        candidate = candidate.astimezone(timezone.utc).astimezone(candidate.tzinfo)
     if candidate <= now_dt:
         candidate += timedelta(days=1)
     return candidate

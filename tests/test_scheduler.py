@@ -5,7 +5,8 @@ without any hass fixture — same approach as the upstream pyscript's test suite
 this module was ported from.
 """
 
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
+from zoneinfo import ZoneInfo
 
 import pytest
 
@@ -589,3 +590,30 @@ def test_next_ready_by_day_offset_three():
 def test_next_ready_by_day_offset_rolls_forward_at_the_exact_hour():
     now = datetime(2024, 1, 15, 7, 0)  # exactly 7am -- must not return "now"
     assert next_ready_by(now, hour=7, min_day_offset=1) == datetime(2024, 1, 16, 7, 0)
+
+
+def test_next_ready_by_snaps_to_a_valid_time_across_a_dst_spring_forward_gap():
+    # Regression for issue #27. UK clocks spring forward 01:00->02:00 on
+    # 2026-03-29 -- 01:00-01:59 that day never occurs as a local time. Naive
+    # wall-clock arithmetic (`replace(hour=1)`) would silently produce that
+    # nonexistent time; next_ready_by must snap it to the real local time at
+    # that instant (02:00 BST) instead.
+    london = ZoneInfo("Europe/London")
+    now = datetime(2026, 3, 28, 12, 0, tzinfo=london)
+
+    result = next_ready_by(now, hour=1, min_day_offset=1)
+
+    assert result == datetime(2026, 3, 29, 2, 0, tzinfo=london)
+    # Confirm it's genuinely a valid local time (round-trips through UTC).
+    assert result.astimezone(timezone.utc).astimezone(london) == result
+
+
+def test_next_ready_by_unaffected_on_an_ordinary_day():
+    # Sanity check that the DST round-trip normalization added for issue #27
+    # is a no-op on a day with no transition.
+    london = ZoneInfo("Europe/London")
+    now = datetime(2026, 6, 1, 12, 0, tzinfo=london)
+
+    result = next_ready_by(now, hour=7, min_day_offset=0)
+
+    assert result == datetime(2026, 6, 2, 7, 0, tzinfo=london)
