@@ -77,8 +77,16 @@ from .providers import (
 def _required(key: str, defaults: dict[str, Any]) -> vol.Required:
     """vol.Required with a default only when one actually exists — an entity
     selector rejects a `None` default that voluptuous would otherwise insert for
-    any key the user leaves blank."""
-    if key in defaults:
+    any key the user leaves blank.
+
+    Checking `defaults.get(key) is not None` rather than `key in defaults`
+    matters because CONF_FORECAST_ENTITY is stored as an explicit `None` (not
+    absent) when forecast_provider was previously "none" — if the options
+    flow later switches to a real forecast provider, `_provider_state()` seeds
+    `defaults` from that stale `None`, and `key in defaults` would still be
+    True, producing exactly the broken `default=None` case this function
+    exists to prevent (issue #38)."""
+    if defaults.get(key) is not None:
         return vol.Required(key, default=defaults[key])
     return vol.Required(key)
 

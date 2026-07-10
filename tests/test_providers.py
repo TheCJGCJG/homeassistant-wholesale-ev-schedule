@@ -12,7 +12,9 @@ from homeassistant.data_entry_flow import FlowResultType, InvalidData
 from custom_components.wholesale_ev_schedule.const import (
     CONF_FORECAST_ATTRIBUTE,
     CONF_FORECAST_DATETIME_KEY,
+    CONF_FORECAST_ENTITY,
     CONF_FORECAST_PRICE_KEY,
+    CONF_FORECAST_PROVIDER,
     CONF_FORECAST_UNIT_MULTIPLIER,
     CONF_RATE_START_KEY,
     CONF_RATE_UNIT_MULTIPLIER,
@@ -22,12 +24,19 @@ from custom_components.wholesale_ev_schedule.const import (
     DOMAIN,
 )
 from custom_components.wholesale_ev_schedule.providers import (
+    FORECAST_PROVIDER_AGILE_PREDICT,
     FORECAST_PROVIDER_CUSTOM,
     FORECAST_PROVIDER_NONE,
     RATE_PROVIDER_CUSTOM,
 )
 
-from .factories import BASE_INPUT, FORECAST_AGILE_PREDICT_INPUT, RATES_OCTOPUS_INPUT
+from .factories import (
+    BASE_INPUT,
+    FORECAST_AGILE_PREDICT_INPUT,
+    FULL_OPTIONS,
+    RATES_OCTOPUS_INPUT,
+    async_setup_wholesale_entry,
+)
 
 
 async def test_custom_rates_provider_routes_to_manual_fields_step(hass):
@@ -134,3 +143,31 @@ async def test_blank_forecast_datetime_key_is_rejected_by_schema(hass):
         await hass.config_entries.flow.async_configure(result["flow_id"], custom_forecast_input)
 
     assert CONF_FORECAST_DATETIME_KEY in exc_info.value.schema_errors
+
+
+async def test_reenabling_forecast_after_none_requires_the_field_cleanly(hass):
+    # Regression for issue #38. An install that chose "None" for forecast has
+    # CONF_FORECAST_ENTITY stored as an explicit None (not absent). Reopening
+    # the options flow and switching to a real forecast provider previously
+    # let that stale None leak through _required() as a schema *default* --
+    # submitting the step without explicitly resupplying forecast_entity then
+    # raised a confusing low-level "Entity None is neither a valid entity ID
+    # nor a valid UUID" error instead of a clean "required field" one.
+    entry = await async_setup_wholesale_entry(
+        hass, options={**FULL_OPTIONS, CONF_FORECAST_PROVIDER: FORECAST_PROVIDER_NONE, CONF_FORECAST_ENTITY: None}
+    )
+
+    result = await hass.config_entries.options.async_init(entry.entry_id)
+    changed_base = {**BASE_INPUT, CONF_FORECAST_PROVIDER: FORECAST_PROVIDER_AGILE_PREDICT}
+    result = await hass.config_entries.options.async_configure(result["flow_id"], changed_base)
+    result = await hass.config_entries.options.async_configure(result["flow_id"], RATES_OCTOPUS_INPUT)
+    assert result["type"] == FlowResultType.FORM
+    assert result["step_id"] == "forecast_agile_predict"
+
+    with pytest.raises(InvalidData) as exc_info:
+        await hass.config_entries.options.async_configure(result["flow_id"], {})
+
+    # The point of the fix: a clean "required key not provided" error, not a
+    # confusing message about None being an invalid entity ID.
+    assert CONF_FORECAST_ENTITY in exc_info.value.schema_errors
+    assert "None" not in str(exc_info.value.schema_errors[CONF_FORECAST_ENTITY])
