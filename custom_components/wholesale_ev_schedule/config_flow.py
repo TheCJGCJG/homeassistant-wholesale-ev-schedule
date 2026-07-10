@@ -87,6 +87,13 @@ def _with_default(key: str, defaults: dict[str, Any], fallback: Any) -> vol.Requ
     return vol.Required(key, default=defaults.get(key, fallback))
 
 
+# A blank/whitespace-only attribute or key name is otherwise silently accepted
+# (bare `str` has no non-empty check) and produces a misleading generic "no
+# price data" error at coordinator runtime instead of a validation failure
+# here at setup time -- see issue #29.
+_NON_BLANK_STR = vol.All(str, vol.Strip, vol.Length(min=1))
+
+
 def _provider_select(options: dict[str, dict]) -> selector.SelectSelector:
     return selector.SelectSelector(
         selector.SelectSelectorConfig(
@@ -179,9 +186,9 @@ def rates_custom_schema(defaults: dict[str, Any]) -> vol.Schema:
             _required(CONF_NEXT_RATES_ENTITY, defaults): selector.EntitySelector(
                 selector.EntitySelectorConfig(domain="event")
             ),
-            _with_default(CONF_RATES_ATTRIBUTE, defaults, "rates"): str,
-            _with_default(CONF_RATE_START_KEY, defaults, "start"): str,
-            _with_default(CONF_RATE_VALUE_KEY, defaults, "value_inc_vat"): str,
+            _with_default(CONF_RATES_ATTRIBUTE, defaults, "rates"): _NON_BLANK_STR,
+            _with_default(CONF_RATE_START_KEY, defaults, "start"): _NON_BLANK_STR,
+            _with_default(CONF_RATE_VALUE_KEY, defaults, "value_inc_vat"): _NON_BLANK_STR,
             _with_default(CONF_RATE_UNIT_MULTIPLIER, defaults, DEFAULT_RATE_UNIT_MULTIPLIER): selector.NumberSelector(
                 selector.NumberSelectorConfig(min=0.01, max=1000, step=0.01, mode=selector.NumberSelectorMode.BOX)
             ),
@@ -205,9 +212,9 @@ def forecast_custom_schema(defaults: dict[str, Any]) -> vol.Schema:
             _required(CONF_FORECAST_ENTITY, defaults): selector.EntitySelector(
                 selector.EntitySelectorConfig(domain="sensor")
             ),
-            _with_default(CONF_FORECAST_ATTRIBUTE, defaults, "prices"): str,
-            _with_default(CONF_FORECAST_DATETIME_KEY, defaults, "date_time"): str,
-            _with_default(CONF_FORECAST_PRICE_KEY, defaults, "agile_pred"): str,
+            _with_default(CONF_FORECAST_ATTRIBUTE, defaults, "prices"): _NON_BLANK_STR,
+            _with_default(CONF_FORECAST_DATETIME_KEY, defaults, "date_time"): _NON_BLANK_STR,
+            _with_default(CONF_FORECAST_PRICE_KEY, defaults, "agile_pred"): _NON_BLANK_STR,
             _with_default(CONF_FORECAST_UNIT_MULTIPLIER, defaults, 1.0): selector.NumberSelector(
                 selector.NumberSelectorConfig(min=0.01, max=1000, step=0.01, mode=selector.NumberSelectorMode.BOX)
             ),
