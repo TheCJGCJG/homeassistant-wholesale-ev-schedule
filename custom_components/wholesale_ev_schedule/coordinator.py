@@ -334,7 +334,10 @@ class WholesaleEvScheduleCoordinator(DataUpdateCoordinator[dict]):
                         "source": source_label,
                     }
                 )
-            except (TypeError, ValueError) as err:
+            except (TypeError, ValueError, AttributeError) as err:
+                # AttributeError covers a non-dict row (e.g. the attribute shaped as
+                # a dict instead of a list, so `rate` is a plain str key) -- `.get()`
+                # on it raises AttributeError, not TypeError/ValueError (issue #32).
                 _LOGGER.debug("Skipping %s rate: %s", source_label, err)
         return slots
 
@@ -365,7 +368,8 @@ class WholesaleEvScheduleCoordinator(DataUpdateCoordinator[dict]):
                         "source": "predicted",
                     }
                 )
-            except (TypeError, ValueError) as err:
+            except (TypeError, ValueError, AttributeError) as err:
+                # See _parse_rate_entity -- AttributeError covers a non-dict row.
                 _LOGGER.debug("Skipping predicted price: %s", err)
         return slots
 

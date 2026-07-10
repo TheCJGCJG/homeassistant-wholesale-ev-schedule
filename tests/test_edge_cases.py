@@ -94,6 +94,43 @@ async def test_forecast_attribute_explicitly_none_is_skipped_not_crashed(hass):
     assert coordinator.data["state"] in ("scheduled", "charging")
 
 
+async def test_rate_attribute_shaped_as_dict_is_skipped_not_crashed(hass):
+    # Regression for issue #32. If the configured attribute is present but
+    # shaped as a dict instead of a list of dicts, iterating it yields its
+    # string keys -- `rate.get(start_key)` on a str raises AttributeError,
+    # which the (TypeError, ValueError) except clause didn't catch.
+    entry = await async_setup_wholesale_entry(hass)
+    coordinator = hass.data[DOMAIN][entry.entry_id]
+
+    now = dt_util.now()
+    hass.states.async_set(CURRENT_RATES_ENTITY, "populated", {"rates": {"start": "bogus"}})
+    set_octopus_rate_entity(hass, NEXT_RATES_ENTITY, [])
+
+    await coordinator.async_set_ready_by(now + timedelta(hours=3))
+    await coordinator.async_set_required_hours(1.0)
+    await hass.async_block_till_done()
+
+    assert coordinator.last_update_success is True
+    assert coordinator.data["state"] in ("error", "unschedulable")
+
+
+async def test_rate_attribute_containing_bare_strings_is_skipped_not_crashed(hass):
+    # Regression for issue #32, the "list of non-dict rows" variant.
+    entry = await async_setup_wholesale_entry(hass)
+    coordinator = hass.data[DOMAIN][entry.entry_id]
+
+    now = dt_util.now()
+    hass.states.async_set(CURRENT_RATES_ENTITY, "populated", {"rates": ["not", "a", "dict"]})
+    set_octopus_rate_entity(hass, NEXT_RATES_ENTITY, [])
+
+    await coordinator.async_set_ready_by(now + timedelta(hours=3))
+    await coordinator.async_set_required_hours(1.0)
+    await hass.async_block_till_done()
+
+    assert coordinator.last_update_success is True
+    assert coordinator.data["state"] in ("error", "unschedulable")
+
+
 async def test_malformed_stored_ready_by_degrades_to_default_instead_of_crashing(hass):
     # Regression for issue #25. A valid-JSON-but-wrong-shaped ready_by (schema
     # drift, a manual edit -- HA's own Store helper only protects against
