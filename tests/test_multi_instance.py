@@ -57,6 +57,30 @@ async def test_config_flow_aborts_on_duplicate_slug_different_casing(hass):
     assert result["reason"] == "already_configured"
 
 
+async def test_config_flow_rejects_blank_name(hass):
+    # Regression for issue #28. A blank (or whitespace-only) name slugifies
+    # to "", producing an invalid, prefix-less entity_id for every entity --
+    # must be rejected with a form error, not silently accepted.
+    result = await hass.config_entries.flow.async_init(DOMAIN, context={"source": config_entries.SOURCE_USER})
+    result = await hass.config_entries.flow.async_configure(result["flow_id"], {**BASE_INPUT, CONF_NAME: "   "})
+
+    assert result["type"] == FlowResultType.FORM
+    assert result["step_id"] == "user"
+    assert result["errors"] == {CONF_NAME: "blank_name"}
+
+
+async def test_config_flow_accepts_a_valid_name_after_a_blank_one_was_rejected(hass):
+    # The same flow_id must still work once corrected, not get stuck.
+    result = await hass.config_entries.flow.async_init(DOMAIN, context={"source": config_entries.SOURCE_USER})
+    result = await hass.config_entries.flow.async_configure(result["flow_id"], {**BASE_INPUT, CONF_NAME: ""})
+    assert result["type"] == FlowResultType.FORM
+
+    result = await hass.config_entries.flow.async_configure(
+        result["flow_id"], {**BASE_INPUT, CONF_NAME: "Tesla EV Schedule"}
+    )
+    assert result["type"] == FlowResultType.FORM  # proceeds to the next step, doesn't abort/error
+
+
 async def test_config_flow_end_to_end_sets_prefix_from_name(hass):
     result = await hass.config_entries.flow.async_init(DOMAIN, context={"source": config_entries.SOURCE_USER})
     result = await hass.config_entries.flow.async_configure(

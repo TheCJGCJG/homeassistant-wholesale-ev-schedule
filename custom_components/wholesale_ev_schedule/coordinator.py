@@ -10,11 +10,13 @@ import homeassistant.util.dt as dt_util
 from homeassistant.config_entries import ConfigEntry
 from homeassistant.const import CONF_NAME
 from homeassistant.core import HomeAssistant
+from homeassistant.exceptions import ServiceValidationError
 from homeassistant.helpers.storage import Store
 from homeassistant.helpers.update_coordinator import DataUpdateCoordinator
 from homeassistant.util import slugify
 
 from .const import (
+    CHARGE_OVERRIDE_AUTO,
     CHARGE_OVERRIDE_FORCE_OFF,
     CHARGE_OVERRIDE_FORCE_ON,
     CONF_CURRENT_RATES_ENTITY,
@@ -78,6 +80,7 @@ from .scheduler import (
 )
 
 _LOGGER = logging.getLogger(__name__)
+_VALID_CHARGE_OVERRIDES = {CHARGE_OVERRIDE_AUTO, CHARGE_OVERRIDE_FORCE_ON, CHARGE_OVERRIDE_FORCE_OFF}
 
 
 class WholesaleEvScheduleCoordinator(DataUpdateCoordinator[dict]):
@@ -172,20 +175,90 @@ class WholesaleEvScheduleCoordinator(DataUpdateCoordinator[dict]):
         ready_by defaults to the next self._default_ready_by_hour (at least
         self._default_ready_by_day_offset days out) if never set."""
         data = await self._store.async_load() or {}
-        self.ready_by = (
-            parse_dt(data["ready_by"])
-            if data.get("ready_by")
-            else next_ready_by(dt_util.now(), self._default_ready_by_hour, self._default_ready_by_day_offset)
+        # Stored JSON is only guaranteed well-formed by HA's Store helper (which
+        # handles outright corrupt/non-JSON files); a valid-JSON-but-wrong-shaped
+        # value here (schema drift, a manual edit) is our own responsibility. A
+        # malformed ready_by/boost_end degrades to "never set" rather than crashing
+        # setup entirely.
+        self.ready_by = self._parse_stored_dt(data.get("ready_by"), "ready_by")
+        if self.ready_by is None:
+            self.ready_by = next_ready_by(dt_util.now(), self._default_ready_by_hour, self._default_ready_by_day_offset)
+        self.required_hours = self._parse_stored_float(
+            data.get("required_hours"), self._default_required_hours, "required_hours"
         )
-        self.required_hours = data.get("required_hours", self._default_required_hours)
-        self.gamble_tolerance = data.get("gamble_tolerance", self._default_gamble_tolerance)
-        self.min_block_hours = data.get("min_block_hours", self._default_min_block_hours)
-        self.max_price = data.get("max_price", self._default_max_price)
-        self.charge_override = data.get("charge_override", DEFAULT_CHARGE_OVERRIDE)
-        self.assumed_charge_kwh = data.get("assumed_charge_kwh", DEFAULT_ASSUMED_CHARGE_KWH)
-        self._stored_sessions = data.get("sessions", [])
-        self._boost_end = parse_dt(data["boost_end"]) if data.get("boost_end") else None
+        self.gamble_tolerance = self._parse_stored_float(
+            data.get("gamble_tolerance"), self._default_gamble_tolerance, "gamble_tolerance"
+        )
+        self.min_block_hours = self._parse_stored_float(
+            data.get("min_block_hours"), self._default_min_block_hours, "min_block_hours"
+        )
+        self.max_price = self._parse_stored_float(data.get("max_price"), self._default_max_price, "max_price")
+        self.charge_override = self._parse_stored_charge_override(data.get("charge_override"))
+        self.assumed_charge_kwh = self._parse_stored_float(
+            data.get("assumed_charge_kwh"), DEFAULT_ASSUMED_CHARGE_KWH, "assumed_charge_kwh"
+        )
+        self._stored_sessions = self._sanitize_stored_sessions(data.get("sessions", []))
+        self._boost_end = self._parse_stored_dt(data.get("boost_end"), "boost_end")
         await self._async_save_stored_state()
+
+    def _sanitize_stored_sessions(self, raw: object) -> list[dict]:
+        """Drop any stored session that isn't a well-formed {start, end, ...} dict
+        -- schema drift, a manual edit, or a partial/interrupted write could
+        otherwise leave one that crashes prune_and_classify at coordinator-update
+        time rather than at load time (issue #34)."""
+        if not isinstance(raw, list):
+            if raw:
+                _LOGGER.warning("Stored sessions is not a list (%s); discarding", type(raw).__name__)
+            return []
+        sessions = []
+        for s in raw:
+            if not isinstance(s, dict):
+                _LOGGER.warning("Discarding malformed stored session (not a dict): %r", s)
+                continue
+            try:
+                parse_dt(s["start"])
+                parse_dt(s["end"])
+            except (KeyError, TypeError, ValueError) as err:
+                _LOGGER.warning("Discarding malformed stored session (%s): %r", err, s)
+                continue
+            sessions.append(s)
+        return sessions
+
+    def _parse_stored_dt(self, value, field_name: str) -> datetime | None:
+        """parse_dt a stored value, degrading to None (rather than raising) if it's
+        present but not a parseable datetime -- see async_load_stored_state."""
+        if not value:
+            return None
+        try:
+            return parse_dt(value)
+        except (TypeError, ValueError) as err:
+            _LOGGER.warning("Stored %s %r is invalid (%s); treating as unset", field_name, value, err)
+            return None
+
+    def _parse_stored_float(self, value, default: float, field_name: str) -> float:
+        """Coerce a stored numeric tuning value to float, degrading to `default`
+        (rather than raising downstream, e.g. `if self.required_hours <= 0` or
+        scheduler.py arithmetic on a str/None) if it's missing or not coercible
+        -- see issue #35."""
+        if value is None:
+            return default
+        try:
+            return float(value)
+        except (TypeError, ValueError) as err:
+            _LOGGER.warning("Stored %s %r is invalid (%s); using default %s", field_name, value, err, default)
+            return default
+
+    def _parse_stored_charge_override(self, value: str | None) -> str:
+        """Validate a stored charge_override against the enum, degrading to
+        DEFAULT_CHARGE_OVERRIDE if it's anything else -- an unrecognized value
+        would otherwise silently behave like "auto" (neither force branch in
+        _with_diagnostics matches it) while still being reported back as the
+        select entity's current_option, outside its declared options (#36)."""
+        if value in _VALID_CHARGE_OVERRIDES:
+            return value
+        if value is not None:
+            _LOGGER.warning("Stored charge_override %r is invalid; using default %s", value, DEFAULT_CHARGE_OVERRIDE)
+        return DEFAULT_CHARGE_OVERRIDE
 
     async def _async_save_stored_state(self) -> None:
         await self._store.async_save(
@@ -207,27 +280,42 @@ class WholesaleEvScheduleCoordinator(DataUpdateCoordinator[dict]):
         await self._async_save_stored_state()
         await self.async_refresh()
 
+    def _reject_non_finite(self, value: float, field_name: str) -> None:
+        """Raise if `value` isn't finite. HA's own number-entity min/max guard
+        silently lets NaN through (`nan < min` and `nan > max` are both False),
+        so this is the last line of defense before persisting it -- a
+        persisted NaN serializes to JSON `null` via orjson, and on the next
+        reload that becomes None and crashes downstream arithmetic, leaving
+        the whole config entry stuck in ConfigEntryState.SETUP_RETRY (#37)."""
+        if not math.isfinite(value):
+            raise ServiceValidationError(f"{field_name} must be a finite number, got {value!r}")
+
     async def async_set_required_hours(self, value: float) -> None:
+        self._reject_non_finite(value, "required_hours")
         self.required_hours = value
         await self._async_save_stored_state()
         await self.async_refresh()
 
     async def async_set_gamble_tolerance(self, value: float) -> None:
+        self._reject_non_finite(value, "gamble_tolerance")
         self.gamble_tolerance = value
         await self._async_save_stored_state()
         await self.async_refresh()
 
     async def async_set_min_block_hours(self, value: float) -> None:
+        self._reject_non_finite(value, "min_block_hours")
         self.min_block_hours = value
         await self._async_save_stored_state()
         await self.async_refresh()
 
     async def async_set_max_price(self, value: float) -> None:
+        self._reject_non_finite(value, "max_price")
         self.max_price = value
         await self._async_save_stored_state()
         await self.async_refresh()
 
     async def async_set_assumed_charge_kwh(self, value: float) -> None:
+        self._reject_non_finite(value, "assumed_charge_kwh")
         self.assumed_charge_kwh = value
         await self._async_save_stored_state()
         await self.async_refresh()
@@ -303,21 +391,35 @@ class WholesaleEvScheduleCoordinator(DataUpdateCoordinator[dict]):
         multiplier = float(options.get(CONF_RATE_UNIT_MULTIPLIER, DEFAULT_RATE_UNIT_MULTIPLIER))
 
         slots = []
-        for rate in entity.attributes.get(attribute, []):
+        # `.get(attribute, [])`'s default only applies when the key is absent -- an
+        # explicit `None` (a real pattern for "not yet populated" attributes) would
+        # otherwise reach `for rate in None:` and crash the whole coordinator update.
+        for rate in entity.attributes.get(attribute) or []:
             try:
                 dt_val = rate.get(start_key)
                 price_val = rate.get(value_key)
                 if dt_val is None or price_val is None:
                     continue
                 slot_dt = dt_util.as_local(parse_dt(dt_val))
+                raw_price = float(price_val)
+                # float() accepts the strings "nan"/"inf" without error (unlike
+                # "N/A", which correctly raises below) -- treat as malformed the
+                # same way rather than silently poisoning downstream min/max/sum
+                # diagnostics and ranking, since NaN's comparison semantics make
+                # it not reliably sort to the back (issue #33).
+                if not math.isfinite(raw_price):
+                    raise ValueError(f"non-finite price: {price_val!r}")
                 slots.append(
                     {
                         "date_time": slot_dt,
-                        "raw_price": round(float(price_val) * multiplier, 4),
+                        "raw_price": round(raw_price * multiplier, 4),
                         "source": source_label,
                     }
                 )
-            except (TypeError, ValueError) as err:
+            except (TypeError, ValueError, AttributeError) as err:
+                # AttributeError covers a non-dict row (e.g. the attribute shaped as
+                # a dict instead of a list, so `rate` is a plain str key) -- `.get()`
+                # on it raises AttributeError, not TypeError/ValueError (issue #32).
                 _LOGGER.debug("Skipping %s rate: %s", source_label, err)
         return slots
 
@@ -332,21 +434,28 @@ class WholesaleEvScheduleCoordinator(DataUpdateCoordinator[dict]):
         multiplier = float(options.get(CONF_FORECAST_UNIT_MULTIPLIER, DEFAULT_FORECAST_UNIT_MULTIPLIER))
 
         slots = []
-        for point in entity.attributes.get(attribute, []):
+        # See _parse_rate_entity -- `.get(attribute, [])`'s default only applies when
+        # the key is absent, not when it's explicitly `None`.
+        for point in entity.attributes.get(attribute) or []:
             try:
                 dt_str = point.get(datetime_key)
                 price_val = point.get(price_key)
                 if dt_str is None or price_val is None:
                     continue
                 slot_dt = dt_util.as_local(parse_dt(dt_str))
+                raw_price = float(price_val)
+                # See _parse_rate_entity -- reject non-finite floats (issue #33).
+                if not math.isfinite(raw_price):
+                    raise ValueError(f"non-finite price: {price_val!r}")
                 slots.append(
                     {
                         "date_time": slot_dt,
-                        "raw_price": round(float(price_val) * multiplier, 4),
+                        "raw_price": round(raw_price * multiplier, 4),
                         "source": "predicted",
                     }
                 )
-            except (TypeError, ValueError) as err:
+            except (TypeError, ValueError, AttributeError) as err:
+                # See _parse_rate_entity -- AttributeError covers a non-dict row.
                 _LOGGER.debug("Skipping predicted price: %s", err)
         return slots
 
@@ -429,7 +538,7 @@ class WholesaleEvScheduleCoordinator(DataUpdateCoordinator[dict]):
         sessions = self._compute_sessions(all_prices, now_dt)
         self._stored_sessions = sessions
         await self._async_save_stored_state()
-        return self._schedule_result(sessions, now_dt, price_summary)
+        return self._schedule_result(sessions, now_dt, price_summary, all_prices)
 
     def _with_diagnostics(self, result: dict, price_summary: dict) -> dict:
         result["price_summary"] = price_summary
@@ -463,14 +572,24 @@ class WholesaleEvScheduleCoordinator(DataUpdateCoordinator[dict]):
         )
 
     def _error_result(self, reason: str, now_dt: datetime, price_summary: dict) -> dict:
+        # A transient price-data gap (e.g. right after an HA restart, before
+        # the price-source integration has finished loading) must not
+        # silently drop an already-in-progress session -- see issue #31.
+        # Compute active/future from stored state the same way
+        # _boosting_result does, instead of unconditionally reporting
+        # nothing in progress just because this cycle couldn't compute a
+        # fresh schedule.
+        active, future = prune_and_classify(self._stored_sessions, now_dt)
+        hours_remaining = compute_hours_remaining(future, active, now_dt)
         return self._with_diagnostics(
             {
                 "state": STATE_ERROR,
-                "desired": False,
+                "desired": active is not None,
                 "sessions": self._stored_sessions,
-                "active_slot": None,
-                "next_slot": None,
-                "hours_remaining": 0.0,
+                "active_slot": active,
+                "next_slot": future[0] if future else None,
+                "upcoming_slots": future,
+                "hours_remaining": hours_remaining,
                 "error_reason": reason,
                 "calculated_at": now_dt.isoformat(),
             },
@@ -496,15 +615,44 @@ class WholesaleEvScheduleCoordinator(DataUpdateCoordinator[dict]):
             price_summary,
         )
 
-    def _schedule_result(self, sessions: list[dict], now_dt: datetime, price_summary: dict) -> dict:
+    def _unschedulable_reason(self, now_dt: datetime, all_prices: list[dict]) -> str:
+        """Best-effort diagnosis of *why* no valid schedule was found. Checked in
+        order of how likely each is to be the actual cause: ready_by leaving less
+        time than required, then not enough price data published yet before
+        ready_by, falling back to the tolerances only once both of those are ruled
+        out -- see issue #26 (this used to always blame tolerances regardless)."""
+        hours_until_ready_by = max(0.0, (self.ready_by - now_dt).total_seconds() / 3600) if self.ready_by else 0.0
+        if self.required_hours > hours_until_ready_by:
+            ready_by_label = self.ready_by.isoformat() if self.ready_by else "unset"
+            return (
+                f"ready_by ({ready_by_label}) leaves only {hours_until_ready_by:.1f}h, "
+                f"less than the {self.required_hours}h required"
+            )
+
+        required_slots = max(1, math.ceil(self.required_hours * 2))
+        if self.ready_by:
+            eligible_count = sum(1 for p in all_prices if p["date_time"] + timedelta(minutes=30) <= self.ready_by)
+        else:
+            eligible_count = len(all_prices)
+        if eligible_count < required_slots:
+            return (
+                f"Not enough price data published yet before ready_by: "
+                f"{eligible_count} half-hour slots available, {required_slots} needed"
+            )
+
+        return (
+            f"No slots satisfy constraints: {self.required_hours}h needed, "
+            f"max_price={self.max_price}/kWh, min_block_hours={self.min_block_hours}h"
+        )
+
+    def _schedule_result(
+        self, sessions: list[dict], now_dt: datetime, price_summary: dict, all_prices: list[dict]
+    ) -> dict:
         active, future = prune_and_classify(sessions, now_dt)
         hours_remaining = compute_hours_remaining(future, active, now_dt)
 
         if not sessions and active is None and self.required_hours > 0:
-            reason = (
-                f"No slots satisfy constraints: {self.required_hours}h needed, "
-                f"max_price={self.max_price}/kWh, min_block_hours={self.min_block_hours}h"
-            )
+            reason = self._unschedulable_reason(now_dt, all_prices)
             return self._with_diagnostics(
                 {
                     "state": STATE_UNSCHEDULABLE,

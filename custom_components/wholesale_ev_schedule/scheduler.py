@@ -10,7 +10,7 @@ from __future__ import annotations
 
 import logging
 import math
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -45,7 +45,16 @@ def get_source_tier(source: str, slot_dt: datetime, now_dt: datetime) -> str:
 
 def compute_effective_price(raw_price: float, tier: str, gamble_tolerance: float) -> float:
     """Risk-adjusted price used for slot ranking. Low gamble_tolerance inflates predicted
-    prices, favouring known actual rates; at 100 all prices are taken at face value."""
+    prices, favouring known actual rates; at 100 all prices are taken at face value.
+
+    gamble_tolerance is clamped to [0, 100] -- its only intended domain. Above
+    100, eff_cred exceeds 1.0 for predicted tiers, making a predicted price
+    *cheaper* than an equally-priced actual one and inverting the documented
+    ranking (issue #41). Sufficiently below 0, eff_cred crosses zero and this
+    function divides by it (issue #42). The live number entity already
+    clamps to [0, 100], but a stored value can bypass that (see coordinator.py).
+    """
+    gamble_tolerance = max(0.0, min(100.0, gamble_tolerance))
     base_cred = BASE_CREDIBILITY[tier]
     eff_cred = base_cred + (1.0 - base_cred) * (gamble_tolerance / 100.0)
     return raw_price / eff_cred
@@ -108,7 +117,19 @@ def find_optimal_slots(
     # A minimum block longer than the whole requirement would make every request for
     # less than that long unschedulable, so relax it to a single contiguous block.
     min_slots_per_block = min(max(1, math.ceil(min_block_hours * 2)), required_slots)
-    max_slots_per_block = math.ceil(max_block_hours * 2) if max_block_hours else None
+    # Per the docstring, max_block_hours only applies "if given and > 0" -- a
+    # zero or negative value means unlimited, same as None (issue #40 found a
+    # negative value was instead treated as truthy, producing a negative cap).
+    max_slots_per_block = math.ceil(max_block_hours * 2) if max_block_hours and max_block_hours > 0 else None
+    if max_slots_per_block is not None:
+        # A cap shorter than the minimum block would make every window's size
+        # range empty (`range(min_slots_per_block, max_window_size + 1)` below
+        # with max_window_size < min_slots_per_block), so no window is ever
+        # generated at all -- a silent false unschedulable regardless of the
+        # actual price data. Floor it to min_slots_per_block instead, the same
+        # way min_slots_per_block itself relaxes when it exceeds the
+        # requirement above.
+        max_slots_per_block = max(max_slots_per_block, min_slots_per_block)
 
     eligible = [s for s in candidate_slots if s["date_time"] + timedelta(minutes=30) <= ready_by_dt]
     eligible.sort(key=lambda s: s["date_time"])
@@ -120,48 +141,94 @@ def find_optimal_slots(
     if len(eligible_from_valid) < required_slots:
         return []
 
+    # Prefix sums so any window's effective-price and raw-price sums are O(1)
+    # subtractions instead of re-summing the slice from scratch for every
+    # (start, size) pair, and windows are identified by (run_id, start_idx)
+    # rather than a materialized slots list/dts set -- both were also O(size)
+    # to build, same as the sums, and just as dominant a cost. This loop was
+    # previously effectively O(len(run) * window_size^2) per run (issue #45).
+    # max_price filtering is folded into the same pass rather than a second
+    # full pass over every window afterward.
     windows = []
-    for run in valid_runs:
+    for run_id, run in enumerate(valid_runs):
         max_window_size = min(required_slots, len(run))
         if max_slots_per_block is not None:
             max_window_size = min(max_window_size, max_slots_per_block)
+
+        eff_prefix = [0.0]
+        raw_prefix = [0.0]
+        for s in run:
+            eff_prefix.append(eff_prefix[-1] + s["effective_price"])
+            raw_prefix.append(raw_prefix[-1] + s["raw_price"])
+
         for size in range(min_slots_per_block, max_window_size + 1):
             for start_idx in range(len(run) - size + 1):
-                w_slots = run[start_idx : start_idx + size]
-                avg_eff = sum(s["effective_price"] for s in w_slots) / size
+                if max_price is not None:
+                    raw_avg = (raw_prefix[start_idx + size] - raw_prefix[start_idx]) / size
+                    if raw_avg > max_price:
+                        continue
+                eff_sum = eff_prefix[start_idx + size] - eff_prefix[start_idx]
                 windows.append(
                     {
-                        "slots": w_slots,
-                        "dts": {s["date_time"] for s in w_slots},
+                        "run_id": run_id,
+                        "start_idx": start_idx,
                         "size": size,
-                        "avg_eff": avg_eff,
+                        "avg_eff": eff_sum / size,
                     }
                 )
 
-    if max_price is not None:
-        windows = [w for w in windows if sum(s["raw_price"] for s in w["slots"]) / w["size"] <= max_price]
-        if not windows:
-            return []
+    if max_price is not None and not windows:
+        return []
 
     windows.sort(key=lambda w: w["avg_eff"])
 
-    # Greedy selection: cheapest non-overlapping windows summing to required_slots.
-    # After each pick the remainder must be 0 or >= min_slots_per_block so it can
-    # always be filled with another full-sized block.
+    def _overlaps(a: dict, b: dict) -> bool:
+        # Windows only ever come from the same contiguous run or different,
+        # disjoint runs (build_contiguous_runs) -- cross-run windows can never
+        # share a slot, and same-run windows share one iff their [start_idx,
+        # start_idx+size) index ranges intersect, exactly like their
+        # underlying date_time ranges would.
+        return a["run_id"] == b["run_id"] and not (
+            a["start_idx"] + a["size"] <= b["start_idx"] or b["start_idx"] + b["size"] <= a["start_idx"]
+        )
+
+    def _greedy_select(strict: bool) -> tuple[list[dict], int]:
+        # Cheapest non-overlapping windows summing to required_slots. In strict mode,
+        # after each pick the remainder must be 0 or >= min_slots_per_block so it can
+        # always be filled with another full-sized block.
+        selected: list[dict] = []
+        left = required_slots
+        for w in windows:
+            if w["size"] > left:
+                continue
+            after = left - w["size"]
+            if strict and after > 0 and after < min_slots_per_block:
+                continue
+            if any(_overlaps(w, sel) for sel in selected):
+                continue
+            selected.append(w)
+            left -= w["size"]
+            if left == 0:
+                break
+        return selected, left
+
+    selected_windows, remaining = _greedy_select(strict=True)
+    if remaining == required_slots and windows:
+        # Strict selection made zero progress -- e.g. required_slots is split across
+        # separate runs that are each too short to leave a full-size remainder on
+        # their own (see issue #23). Rather than report unschedulable outright, relax
+        # the "leave a neat remainder" preference so at least one window gets picked,
+        # and let the leftover-fallback below top up whatever's left.
+        selected_windows, remaining = _greedy_select(strict=False)
+
+    # Only the (few) selected windows' actual date_times are resolved here --
+    # deferring this from window-generation time is exactly what keeps that
+    # loop O(1) per window instead of O(size).
     selected_dts: set = set()
-    remaining = required_slots
-    for w in windows:
-        if w["size"] > remaining:
-            continue
-        after = remaining - w["size"]
-        if after > 0 and after < min_slots_per_block:
-            continue
-        if w["dts"] & selected_dts:
-            continue
-        selected_dts |= w["dts"]
-        remaining -= w["size"]
-        if remaining == 0:
-            break
+    for w in selected_windows:
+        run = valid_runs[w["run_id"]]
+        for s in run[w["start_idx"] : w["start_idx"] + w["size"]]:
+            selected_dts.add(s["date_time"])
 
     # Relaxed fallback: top up any small remainder with the cheapest leftover slots
     # from valid runs (the last block may end up shorter than min_block_hours).
@@ -229,13 +296,25 @@ def parse_dt(value) -> datetime:
 
 def prune_and_classify(sessions: list[dict], now_dt: datetime) -> tuple[dict | None, list[dict]]:
     """Split sessions into (active_session | None, [future_sessions]). Expired
-    sessions (end <= now_dt) are silently dropped."""
+    sessions (end <= now_dt) are silently dropped.
+
+    Sessions shouldn't normally overlap (the scheduler never generates
+    overlapping ones in a single computation), but sessions is long-lived
+    persisted state read back across update cycles -- if more than one
+    matches "active" (start <= now_dt < end), the first encountered wins
+    deterministically and the rest are logged and discarded, rather than the
+    previous behavior of silently overwriting `active` with no trace of the
+    discarded one, which undercounted compute_hours_remaining (issue #43).
+    """
     active = None
     future = []
     for s in sessions:
         start = parse_dt(s["start"])
         end = parse_dt(s["end"])
         if start <= now_dt < end:
+            if active is not None:
+                _LOGGER.warning("Discarding unexpected overlapping active session %r (keeping %r)", s, active)
+                continue
             active = s
         elif end > now_dt:
             future.append(s)
@@ -244,13 +323,22 @@ def prune_and_classify(sessions: list[dict], now_dt: datetime) -> tuple[dict | N
 
 def compute_hours_remaining(future_sessions: list[dict], active_session: dict | None, now_dt: datetime) -> float:
     """Total uncommenced committed charging time: remaining portion of the active
-    session plus all future sessions in full."""
+    session plus all future sessions in full.
+
+    Both branches derive their duration from start/end, not a stored
+    duration_hours field -- the future-session branch used to trust
+    duration_hours verbatim, which could silently drift out of sync with the
+    session's own start/end (a partial write, a manual edit, a future schema
+    change) and corrupt this total with no crash to surface it (issue #44).
+    """
     total = 0.0
     if active_session:
         end = parse_dt(active_session["end"])
         total += max(0.0, (end - now_dt).total_seconds() / 3600)
     for s in future_sessions:
-        total += s.get("duration_hours", 0.0)
+        start = parse_dt(s["start"])
+        end = parse_dt(s["end"])
+        total += (end - start).total_seconds() / 3600
     return total
 
 
@@ -350,6 +438,13 @@ def next_ready_by(now_dt: datetime, hour: int = 7, min_day_offset: int = 0) -> d
     at setup time.
     """
     candidate = now_dt.replace(hour=hour, minute=0, second=0, microsecond=0) + timedelta(days=min_day_offset)
+    if candidate.tzinfo is not None:
+        # `replace()` does naive wall-clock arithmetic -- on a DST transition day
+        # where `hour` falls in the skipped "spring forward" gap (e.g. 1am->2am
+        # somewhere becomes 2am->3am), the result may be a local time that never
+        # occurred. Round-tripping through UTC snaps it to the real local time
+        # at that instant instead of silently keeping an invalid offset (#27).
+        candidate = candidate.astimezone(timezone.utc).astimezone(candidate.tzinfo)
     if candidate <= now_dt:
         candidate += timedelta(days=1)
     return candidate

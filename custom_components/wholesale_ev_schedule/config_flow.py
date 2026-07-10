@@ -77,14 +77,29 @@ from .providers import (
 def _required(key: str, defaults: dict[str, Any]) -> vol.Required:
     """vol.Required with a default only when one actually exists — an entity
     selector rejects a `None` default that voluptuous would otherwise insert for
-    any key the user leaves blank."""
-    if key in defaults:
+    any key the user leaves blank.
+
+    Checking `defaults.get(key) is not None` rather than `key in defaults`
+    matters because CONF_FORECAST_ENTITY is stored as an explicit `None` (not
+    absent) when forecast_provider was previously "none" — if the options
+    flow later switches to a real forecast provider, `_provider_state()` seeds
+    `defaults` from that stale `None`, and `key in defaults` would still be
+    True, producing exactly the broken `default=None` case this function
+    exists to prevent (issue #38)."""
+    if defaults.get(key) is not None:
         return vol.Required(key, default=defaults[key])
     return vol.Required(key)
 
 
 def _with_default(key: str, defaults: dict[str, Any], fallback: Any) -> vol.Required:
     return vol.Required(key, default=defaults.get(key, fallback))
+
+
+# A blank/whitespace-only attribute or key name is otherwise silently accepted
+# (bare `str` has no non-empty check) and produces a misleading generic "no
+# price data" error at coordinator runtime instead of a validation failure
+# here at setup time -- see issue #29.
+_NON_BLANK_STR = vol.All(str, vol.Strip, vol.Length(min=1))
 
 
 def _provider_select(options: dict[str, dict]) -> selector.SelectSelector:
@@ -179,9 +194,9 @@ def rates_custom_schema(defaults: dict[str, Any]) -> vol.Schema:
             _required(CONF_NEXT_RATES_ENTITY, defaults): selector.EntitySelector(
                 selector.EntitySelectorConfig(domain="event")
             ),
-            _with_default(CONF_RATES_ATTRIBUTE, defaults, "rates"): str,
-            _with_default(CONF_RATE_START_KEY, defaults, "start"): str,
-            _with_default(CONF_RATE_VALUE_KEY, defaults, "value_inc_vat"): str,
+            _with_default(CONF_RATES_ATTRIBUTE, defaults, "rates"): _NON_BLANK_STR,
+            _with_default(CONF_RATE_START_KEY, defaults, "start"): _NON_BLANK_STR,
+            _with_default(CONF_RATE_VALUE_KEY, defaults, "value_inc_vat"): _NON_BLANK_STR,
             _with_default(CONF_RATE_UNIT_MULTIPLIER, defaults, DEFAULT_RATE_UNIT_MULTIPLIER): selector.NumberSelector(
                 selector.NumberSelectorConfig(min=0.01, max=1000, step=0.01, mode=selector.NumberSelectorMode.BOX)
             ),
@@ -205,9 +220,9 @@ def forecast_custom_schema(defaults: dict[str, Any]) -> vol.Schema:
             _required(CONF_FORECAST_ENTITY, defaults): selector.EntitySelector(
                 selector.EntitySelectorConfig(domain="sensor")
             ),
-            _with_default(CONF_FORECAST_ATTRIBUTE, defaults, "prices"): str,
-            _with_default(CONF_FORECAST_DATETIME_KEY, defaults, "date_time"): str,
-            _with_default(CONF_FORECAST_PRICE_KEY, defaults, "agile_pred"): str,
+            _with_default(CONF_FORECAST_ATTRIBUTE, defaults, "prices"): _NON_BLANK_STR,
+            _with_default(CONF_FORECAST_DATETIME_KEY, defaults, "date_time"): _NON_BLANK_STR,
+            _with_default(CONF_FORECAST_PRICE_KEY, defaults, "agile_pred"): _NON_BLANK_STR,
             _with_default(CONF_FORECAST_UNIT_MULTIPLIER, defaults, 1.0): selector.NumberSelector(
                 selector.NumberSelectorConfig(min=0.01, max=1000, step=0.01, mode=selector.NumberSelectorMode.BOX)
             ),
@@ -295,17 +310,25 @@ class WholesaleEvScheduleConfigFlow(_ProviderStepsMixin, ConfigFlow, domain=DOMA
         self._name: str = DEFAULT_NAME
 
     async def async_step_user(self, user_input: dict[str, Any] | None = None):
+        errors: dict[str, str] = {}
         if user_input is not None:
-            name = user_input.pop(CONF_NAME)
-            # The slugified name becomes the entity_id prefix — enforce
-            # uniqueness so two instances can never collide on entity_ids.
-            await self.async_set_unique_id(slugify(name))
-            self._abort_if_unique_id_configured()
+            name = user_input.pop(CONF_NAME).strip()
+            # A blank (or whitespace-only) name slugifies to "" (see issue
+            # #28), producing an invalid, prefix-less entity_id for every
+            # entity and defeating the collision guarantee below entirely --
+            # reject it here instead of letting it reach async_set_unique_id.
+            if not name or not slugify(name):
+                errors[CONF_NAME] = "blank_name"
+            else:
+                # The slugified name becomes the entity_id prefix — enforce
+                # uniqueness so two instances can never collide on entity_ids.
+                await self.async_set_unique_id(slugify(name))
+                self._abort_if_unique_id_configured()
 
-            self._name = name
-            return await self._async_after_base_step(user_input)
+                self._name = name
+                return await self._async_after_base_step(user_input)
 
-        return self.async_show_form(step_id="user", data_schema=base_schema({}, include_name=True))
+        return self.async_show_form(step_id="user", data_schema=base_schema({}, include_name=True), errors=errors)
 
     async def _async_finish(self, options: dict[str, Any]):
         return self.async_create_entry(title=self._name, data={CONF_NAME: self._name}, options=options)

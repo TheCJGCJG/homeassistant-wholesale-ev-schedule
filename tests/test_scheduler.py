@@ -5,7 +5,9 @@ without any hass fixture — same approach as the upstream pyscript's test suite
 this module was ported from.
 """
 
-from datetime import datetime, timedelta
+import time
+from datetime import datetime, timedelta, timezone
+from zoneinfo import ZoneInfo
 
 import pytest
 
@@ -87,6 +89,34 @@ def test_compute_effective_price_inflated_at_zero_gamble_tolerance():
 def test_compute_effective_price_actual_tier_always_face_value():
     for tolerance in (0.0, 50.0, 100.0):
         assert compute_effective_price(12.5, TIER_ACTUAL, tolerance) == pytest.approx(12.5)
+
+
+def test_compute_effective_price_clamps_above_100_instead_of_inverting_ranking():
+    # Regression for issue #41. gamble_tolerance > 100 previously pushed
+    # eff_cred above 1.0 for predicted tiers, making a predicted price
+    # *cheaper* than an equally-priced actual one -- the exact opposite of
+    # the documented "at 100 all prices are taken at face value" intent.
+    # Clamped to 100, a predicted price must never come out cheaper than an
+    # actual price at the same raw value.
+    actual = compute_effective_price(10.0, TIER_ACTUAL, gamble_tolerance=150.0)
+    predicted = compute_effective_price(10.0, TIER_PREDICTED_72_PLUS, gamble_tolerance=150.0)
+    assert predicted >= actual
+    assert predicted == pytest.approx(10.0)  # clamped to 100 => eff_cred=1.0 => face value, same as actual
+
+
+def test_compute_effective_price_clamps_below_0_instead_of_dividing_by_zero():
+    # Regression for issue #42. For any predicted tier, eff_cred crosses zero
+    # at gamble_tolerance = -100 * base_cred / (1 - base_cred) (e.g. -66.67
+    # for TIER_PREDICTED_72_PLUS) -- previously an unhandled ZeroDivisionError
+    # at that exact point, and a negative/wildly-amplified price either side
+    # of it. Fixed by the same [0, 100] clamp added for #41: any negative
+    # gamble_tolerance now clamps to 0 (the "fully discount predictions"
+    # end of the documented range), never reaching eff_cred <= 0.
+    price = compute_effective_price(10.0, TIER_PREDICTED_72_PLUS, gamble_tolerance=-66.666666666666666)
+    assert price == pytest.approx(10.0 / BASE_CREDIBILITY[TIER_PREDICTED_72_PLUS])  # same as gamble_tolerance=0
+
+    for tolerance in (-1000.0, -300.0, -66.666666666666666, -1.0):
+        assert compute_effective_price(10.0, TIER_PREDICTED_72_PLUS, tolerance) > 0
 
 
 def test_assign_credibilities_adds_tier_and_effective_price():
@@ -226,6 +256,30 @@ def test_find_optimal_slots_skips_a_window_too_large_for_the_remaining_need():
     assert run_b[2]["date_time"] not in result_dts
 
 
+def test_find_optimal_slots_disjoint_runs_each_too_short_for_a_neat_remainder():
+    # Regression for issue #23. Two disjoint 2-slot runs (1h each), required=3
+    # slots, min_block_hours=1h (min_slots_per_block=2). Picking either run
+    # alone would leave a 1-slot remainder, smaller than min_slots_per_block,
+    # so the strict pass's "leave 0 or a full block" guard rejects both --
+    # making zero progress, since no arrangement of *whole* runs can satisfy
+    # that guard here. Previously this made the relaxed leftover-fallback
+    # unreachable too (it only fires once something's already been picked),
+    # so the function returned [] even though scheduling one full run plus one
+    # leftover slot from the other is a perfectly legitimate 3-slot answer.
+    run_a = make_slots(NOW, 2, price=1.0)
+    run_b_start = NOW + timedelta(hours=5)
+    run_b = make_slots(run_b_start, 2, price=2.0)
+    slots = assign_credibilities(run_a + run_b, NOW, gamble_tolerance=100.0)
+
+    result = find_optimal_slots(slots, required_slots=3, ready_by_dt=NOW + timedelta(hours=10), min_block_hours=1.0)
+
+    result_dts = {s["date_time"] for s in result}
+    assert len(result_dts) == 3
+    # The cheaper run (run_a) is taken in full, plus the cheapest single slot
+    # from run_b to top up the remainder.
+    assert result_dts == {run_a[0]["date_time"], run_a[1]["date_time"], run_b[0]["date_time"]}
+
+
 def test_find_optimal_slots_caps_individual_window_size_with_max_block_hours():
     # A single uniformly-cheap 4-slot (2h) run, required=4 slots, capped at 1h
     # (2 slots) per block. The cap limits how large any one *window* can be
@@ -246,6 +300,49 @@ def test_find_optimal_slots_caps_individual_window_size_with_max_block_hours():
     )
 
     assert {s["date_time"] for s in result} == {s["date_time"] for s in run}
+
+
+def test_find_optimal_slots_max_block_hours_below_min_block_hours_is_floored_not_empty():
+    # Regression for issue #40. 4 hours of uniform, contiguous, cheap data
+    # (8 slots), required=4 slots, min_block_hours=1.0 (2 slots),
+    # max_block_hours=0.5 (1 slot -- less than min_block_hours). Previously
+    # max_slots_per_block < min_slots_per_block made the window-size range
+    # `range(min_slots_per_block, max_window_size + 1)` empty for every run,
+    # so no window was ever generated at all -- a silent false unschedulable
+    # regardless of the data. max_block_hours is now floored to
+    # min_block_hours instead.
+    run = make_slots(NOW, 8, price=1.0)
+    slots = assign_credibilities(run, NOW, gamble_tolerance=100.0)
+
+    result = find_optimal_slots(
+        slots,
+        required_slots=4,
+        ready_by_dt=NOW + timedelta(hours=10),
+        min_block_hours=1.0,
+        max_block_hours=0.5,
+    )
+
+    assert len(result) == 4
+
+
+def test_find_optimal_slots_negative_max_block_hours_is_treated_as_unlimited():
+    # Regression for issue #40. `if max_block_hours:` treated any negative
+    # value as truthy, producing a negative max_slots_per_block and the same
+    # empty-window-range bug as above. Per the function's own docstring,
+    # max_block_hours only applies "if given and > 0" -- zero or negative
+    # must mean unlimited, same as None.
+    run = make_slots(NOW, 8, price=1.0)
+    slots = assign_credibilities(run, NOW, gamble_tolerance=100.0)
+
+    result = find_optimal_slots(
+        slots,
+        required_slots=4,
+        ready_by_dt=NOW + timedelta(hours=10),
+        min_block_hours=1.0,
+        max_block_hours=-1.0,
+    )
+
+    assert len(result) == 4
 
 
 def test_find_optimal_slots_max_block_hours_produces_a_real_gap_around_a_price_spike():
@@ -308,6 +405,27 @@ def test_find_optimal_slots_max_block_hours_zero_means_unlimited():
 
     sessions = build_contiguous_runs(sorted(result, key=lambda s: s["date_time"]))
     assert len(sessions) == 1
+
+
+def test_find_optimal_slots_stays_fast_with_a_large_window_and_run():
+    # Regression guard for issue #45. Window construction (price sums, plus
+    # the slots-list/dts-set materialized per candidate window) was
+    # previously O(size) per window, making this call ~1.1-1.8s depending on
+    # exactly what was fixed along the way. With window generation genuinely
+    # O(1) per window (prefix sums for the price sums, deferring date_time
+    # resolution to only the handful of actually-selected windows), the same
+    # call now completes in well under 0.05s -- a 0.5s ceiling still comfortably
+    # catches a regression back toward the old per-window-O(size) behavior
+    # without being flaky on slow CI runners.
+    run = make_slots(NOW, 900, price=1.0)
+    slots = assign_credibilities(run, NOW, gamble_tolerance=100.0)
+
+    start = time.perf_counter()
+    result = find_optimal_slots(slots, required_slots=225, ready_by_dt=NOW + timedelta(hours=500), min_block_hours=1.0)
+    elapsed = time.perf_counter() - start
+
+    assert len(result) == 225
+    assert elapsed < 0.5
 
 
 def test_slots_to_sessions_groups_contiguous_runs():
@@ -380,11 +498,52 @@ def test_prune_and_classify_no_active_session():
     assert future_result == [future]
 
 
+def test_prune_and_classify_keeps_first_of_two_overlapping_active_sessions():
+    # Regression for issue #43. Two sessions both satisfy start <= now < end
+    # -- shouldn't normally happen (the scheduler never generates overlapping
+    # sessions in one computation), but stored sessions persist across update
+    # cycles, so a bug elsewhere or a partial write could produce this.
+    # Previously the second unconditionally overwrote `active`, silently
+    # dropping the first with no trace and undercounting hours_remaining.
+    first = _session(NOW - timedelta(hours=1), NOW + timedelta(hours=1))
+    second = _session(NOW - timedelta(minutes=30), NOW + timedelta(minutes=30))
+
+    active_result, future_result = prune_and_classify([first, second], NOW)
+
+    assert active_result == first
+    assert future_result == []  # the discarded overlap must not leak into future either
+
+
+def test_prune_and_classify_overlap_resolution_follows_input_order():
+    # Same two sessions, reversed input order -- confirms which one wins is
+    # deterministic based on list order (first encountered), not some
+    # accidental artifact, and not fixed by e.g. earliest start.
+    first = _session(NOW - timedelta(hours=1), NOW + timedelta(hours=1))
+    second = _session(NOW - timedelta(minutes=30), NOW + timedelta(minutes=30))
+
+    active_result, future_result = prune_and_classify([second, first], NOW)
+
+    assert active_result == second
+    assert future_result == []
+
+
 def test_compute_hours_remaining_counts_partial_active_plus_future():
     active = _session(NOW - timedelta(minutes=30), NOW + timedelta(minutes=30))
     future = _session(NOW + timedelta(hours=1), NOW + timedelta(hours=2))
     remaining = compute_hours_remaining([future], active, NOW)
     assert remaining == pytest.approx(1.5)
+
+
+def test_compute_hours_remaining_derives_future_duration_from_start_end_not_stored_field():
+    # Regression for issue #44. A future session with start/end one hour
+    # apart but a stale duration_hours=5.0 (drifted from a partial write, a
+    # manual edit, or a future schema change that stops keeping the two in
+    # sync) must contribute its true 1h duration, not the stale field --
+    # consistent with the active-session branch, which already derives from
+    # end/now_dt rather than trusting a stored field.
+    drifted_future = _session(NOW + timedelta(hours=1), NOW + timedelta(hours=2), duration_hours=5.0)
+    remaining = compute_hours_remaining([drifted_future], None, NOW)
+    assert remaining == pytest.approx(1.0)
 
 
 def test_compute_hours_remaining_zero_when_nothing_scheduled():
@@ -565,3 +724,30 @@ def test_next_ready_by_day_offset_three():
 def test_next_ready_by_day_offset_rolls_forward_at_the_exact_hour():
     now = datetime(2024, 1, 15, 7, 0)  # exactly 7am -- must not return "now"
     assert next_ready_by(now, hour=7, min_day_offset=1) == datetime(2024, 1, 16, 7, 0)
+
+
+def test_next_ready_by_snaps_to_a_valid_time_across_a_dst_spring_forward_gap():
+    # Regression for issue #27. UK clocks spring forward 01:00->02:00 on
+    # 2026-03-29 -- 01:00-01:59 that day never occurs as a local time. Naive
+    # wall-clock arithmetic (`replace(hour=1)`) would silently produce that
+    # nonexistent time; next_ready_by must snap it to the real local time at
+    # that instant (02:00 BST) instead.
+    london = ZoneInfo("Europe/London")
+    now = datetime(2026, 3, 28, 12, 0, tzinfo=london)
+
+    result = next_ready_by(now, hour=1, min_day_offset=1)
+
+    assert result == datetime(2026, 3, 29, 2, 0, tzinfo=london)
+    # Confirm it's genuinely a valid local time (round-trips through UTC).
+    assert result.astimezone(timezone.utc).astimezone(london) == result
+
+
+def test_next_ready_by_unaffected_on_an_ordinary_day():
+    # Sanity check that the DST round-trip normalization added for issue #27
+    # is a no-op on a day with no transition.
+    london = ZoneInfo("Europe/London")
+    now = datetime(2026, 6, 1, 12, 0, tzinfo=london)
+
+    result = next_ready_by(now, hour=7, min_day_offset=0)
+
+    assert result == datetime(2026, 6, 2, 7, 0, tzinfo=london)
