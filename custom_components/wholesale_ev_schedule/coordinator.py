@@ -30,6 +30,7 @@ from .const import (
     CONF_RATES_ATTRIBUTE,
     CONF_RATES_PROVIDER,
     CONF_UPDATE_INTERVAL_MINUTES,
+    DEFAULT_ASSUMED_CHARGE_KWH,
     DEFAULT_CHARGE_OVERRIDE,
     DEFAULT_FORECAST_ATTRIBUTE,
     DEFAULT_FORECAST_DATETIME_KEY,
@@ -103,6 +104,7 @@ class WholesaleEvScheduleCoordinator(DataUpdateCoordinator[dict]):
         self.min_block_hours: float = DEFAULT_MIN_BLOCK_HOURS
         self.max_price: float = DEFAULT_MAX_PRICE
         self.charge_override: str = DEFAULT_CHARGE_OVERRIDE
+        self.assumed_charge_kwh: float = DEFAULT_ASSUMED_CHARGE_KWH
 
         self._stored_sessions: list[dict] = []
         self._boost_end: datetime | None = None
@@ -140,6 +142,7 @@ class WholesaleEvScheduleCoordinator(DataUpdateCoordinator[dict]):
         self.min_block_hours = data.get("min_block_hours", DEFAULT_MIN_BLOCK_HOURS)
         self.max_price = data.get("max_price", DEFAULT_MAX_PRICE)
         self.charge_override = data.get("charge_override", DEFAULT_CHARGE_OVERRIDE)
+        self.assumed_charge_kwh = data.get("assumed_charge_kwh", DEFAULT_ASSUMED_CHARGE_KWH)
         self._stored_sessions = data.get("sessions", [])
         self._boost_end = parse_dt(data["boost_end"]) if data.get("boost_end") else None
         await self._async_save_stored_state()
@@ -152,6 +155,7 @@ class WholesaleEvScheduleCoordinator(DataUpdateCoordinator[dict]):
             "min_block_hours": self.min_block_hours,
             "max_price": self.max_price,
             "charge_override": self.charge_override,
+            "assumed_charge_kwh": self.assumed_charge_kwh,
             "sessions": self._stored_sessions,
             "boost_end": self._boost_end.isoformat() if self._boost_end else None,
         })
@@ -178,6 +182,11 @@ class WholesaleEvScheduleCoordinator(DataUpdateCoordinator[dict]):
 
     async def async_set_max_price(self, value: float) -> None:
         self.max_price = value
+        await self._async_save_stored_state()
+        await self.async_refresh()
+
+    async def async_set_assumed_charge_kwh(self, value: float) -> None:
+        self.assumed_charge_kwh = value
         await self._async_save_stored_state()
         await self.async_refresh()
 
@@ -210,16 +219,17 @@ class WholesaleEvScheduleCoordinator(DataUpdateCoordinator[dict]):
 
     async def async_reset(self) -> None:
         """Put everything back to defaults: ready_by (next DEFAULT_READY_BY_HOUR),
-        required_hours, gamble tolerance, min block hours, max price, and the
-        charge override, on top of clearing the schedule and any boost like
-        async_stop does. Intended to be triggered by an automation on
-        charger-unplugged, so the next plug-in starts from a completely clean
-        slate rather than carrying over yesterday's tweaks."""
+        required_hours, gamble tolerance, min block hours, max price, assumed
+        charge kWh, and the charge override, on top of clearing the schedule
+        and any boost like async_stop does. Intended to be triggered by an
+        automation on charger-unplugged, so the next plug-in starts from a
+        completely clean slate rather than carrying over yesterday's tweaks."""
         self.ready_by = next_ready_by(dt_util.now(), DEFAULT_READY_BY_HOUR)
         self.required_hours = DEFAULT_REQUIRED_HOURS
         self.gamble_tolerance = DEFAULT_GAMBLE_TOLERANCE
         self.min_block_hours = DEFAULT_MIN_BLOCK_HOURS
         self.max_price = DEFAULT_MAX_PRICE
+        self.assumed_charge_kwh = DEFAULT_ASSUMED_CHARGE_KWH
         self.charge_override = DEFAULT_CHARGE_OVERRIDE
         self._stored_sessions = []
         self._boost_end = None

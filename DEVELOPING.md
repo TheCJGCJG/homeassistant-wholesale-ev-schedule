@@ -90,7 +90,7 @@ All tests run inside Docker (`public.ecr.aws/docker/library/python:trixie`):
 ./run-tests.sh --shell      # interactive shell in the container
 ```
 
-101 tests, 97% branch coverage (100% on `config_flow.py`, `providers.py`,
+106 tests, 97% branch coverage (100% on `config_flow.py`, `providers.py`,
 `button.py`, `select.py`):
 - `tests/test_scheduler.py` — unit tests for the pure scheduling algorithm, including max_block_hours splitting (the pure capability), next_ready_by, and the price-summary diagnostics
 - `tests/test_integration_smoke.py` — full config/options flow, entity registration, idle vs error state on a fresh setup given the new defaults
@@ -103,6 +103,7 @@ All tests run inside Docker (`public.ecr.aws/docker/library/python:trixie`):
 - `tests/test_boost_stop.py` — boost start/self-reset, boost cancel, stop vs reset (reset restores every default), boost_ends_at visibility
 - `tests/test_diagnostics.py` — diagnostic sensors are hidden by default, price-summary diagnostics populate even when idle, block/upcoming-block sensors, live tuning number entities
 - `tests/test_edge_cases.py` — malformed price data, ready_by rolling forward instead of erroring once passed, active-session persistence across a price refresh, natural boost expiry
+- `tests/test_estimated_cost.py` — next-slot average price and the estimated-cost sensor derived from it via assumed_charge_kwh, including live updates when the number changes, persistence, and reset restoring its default
 
 ## CI / releases
 

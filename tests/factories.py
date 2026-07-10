@@ -81,6 +81,7 @@ FULL_OPTIONS = {
 _ENTITY_SUFFIXES = {
     "sensor": [
         "charging_state", "charging_schedule", "next_slot_start", "next_slot_end",
+        "next_slot_average_price", "next_slot_estimated_cost",
         "hours_remaining", "time_remaining", "boost_ends_at", "block_count",
         "upcoming_block_2_start", "upcoming_block_2_end",
         "upcoming_block_3_start", "upcoming_block_3_end",
@@ -90,7 +91,7 @@ _ENTITY_SUFFIXES = {
     "binary_sensor": ["charging_desired"],
     "number": [
         "charging_hours_required", "boost_duration_hours",
-        "gamble_tolerance", "min_block_hours", "max_price",
+        "gamble_tolerance", "min_block_hours", "max_price", "assumed_charge_kwh",
     ],
     "datetime": ["ready_by"],
     "select": ["charge_override"],

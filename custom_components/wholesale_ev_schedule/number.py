@@ -19,6 +19,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry, async_add_e
         EvChargingGambleToleranceNumber(coordinator),
         EvChargingMinBlockHoursNumber(coordinator),
         EvChargingMaxPriceNumber(coordinator),
+        EvChargingAssumedChargeKwhNumber(coordinator),
     ])
 
 
@@ -135,3 +136,28 @@ class EvChargingMaxPriceNumber(WholesaleEvScheduleEntity, NumberEntity):
 
     async def async_set_native_value(self, value: float) -> None:
         await self.coordinator.async_set_max_price(value)
+
+
+class EvChargingAssumedChargeKwhNumber(WholesaleEvScheduleEntity, NumberEntity):
+    """Rough assumed energy draw per charging session, used only to compute
+    the estimated cost sensors — this integration only ever knows time slots
+    and price, never actual delivered kWh. Set this to roughly match your
+    car/charger for a more accurate estimate."""
+
+    _attr_translation_key = "assumed_charge_kwh"
+    _attr_icon = "mdi:battery-charging"
+    _attr_native_min_value = 0.0
+    _attr_native_max_value = 150.0
+    _attr_native_step = 0.5
+    _attr_native_unit_of_measurement = "kWh"
+    _attr_mode = NumberMode.BOX
+
+    def __init__(self, coordinator: WholesaleEvScheduleCoordinator) -> None:
+        super().__init__(coordinator, "number", "assumed_charge_kwh")
+
+    @property
+    def native_value(self) -> float:
+        return self.coordinator.assumed_charge_kwh
+
+    async def async_set_native_value(self, value: float) -> None:
+        await self.coordinator.async_set_assumed_charge_kwh(value)

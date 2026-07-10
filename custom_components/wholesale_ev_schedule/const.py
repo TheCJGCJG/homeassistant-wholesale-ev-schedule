@@ -68,6 +68,11 @@ DEFAULT_MIN_BLOCK_HOURS = 4.0
 DEFAULT_MAX_PRICE = 20.0
 DEFAULT_UPDATE_INTERVAL_MINUTES = 5
 DEFAULT_REQUIRED_HOURS = 12.0
+# A rough assumed energy draw per charging session, purely for the estimated
+# cost sensor — this integration only ever knows time slots and price, never
+# actual delivered kWh, so this is a stand-in the user sets to roughly match
+# their car/charger.
+DEFAULT_ASSUMED_CHARGE_KWH = 7.0
 
 # ready_by has no fixed default — it rolls forward automatically. Both on
 # first setup (no stored value yet) and whenever the current ready_by is

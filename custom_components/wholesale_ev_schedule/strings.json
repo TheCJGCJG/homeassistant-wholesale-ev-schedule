@@ -106,6 +106,8 @@
       "charging_schedule": { "name": "Schedule" },
       "next_slot_start": { "name": "Next slot start" },
       "next_slot_end": { "name": "Next slot end" },
+      "next_slot_average_price": { "name": "Next slot average price" },
+      "next_slot_estimated_cost": { "name": "Next slot estimated cost" },
       "hours_remaining": { "name": "Hours remaining" },
       "time_remaining": { "name": "Time remaining" },
       "boost_ends_at": { "name": "Boost ends at" },
@@ -130,7 +132,8 @@
       "boost_duration_hours": { "name": "Boost duration" },
       "gamble_tolerance": { "name": "Gamble tolerance" },
       "min_block_hours": { "name": "Minimum block length" },
-      "max_price": { "name": "Maximum price" }
+      "max_price": { "name": "Maximum price" },
+      "assumed_charge_kwh": { "name": "Assumed charge kWh" }
     },
     "datetime": {
       "ready_by": { "name": "Ready by" }

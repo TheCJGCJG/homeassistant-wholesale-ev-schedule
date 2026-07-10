@@ -85,6 +85,11 @@ people won't need to touch them):
   against your price data after your configured unit multiplier is applied
   (e.g. pence/kWh for a typical UK £/kWh source with the default 100×
   multiplier). Set it to match whatever unit your prices actually end up in.
+- **Assumed charge kWh** (default 7) — a rough stand-in for how much energy a
+  session actually delivers, since this integration only ever knows time
+  slots and price, never real delivered kWh. Used purely to compute the
+  estimated cost sensor below — set it to roughly match your car/charger for
+  a more useful number.
 
 **Boost, stop, and reset:**
 - **Boost duration** (`number`) — set this to a number of hours to start
@@ -96,10 +101,11 @@ people won't need to touch them):
   tuning preference untouched (useful if you've decided not to charge today
   but the same deadline still applies tomorrow).
 - **Reset** (button) — puts everything back to defaults: ready-by, hours
-  required, gamble tolerance, minimum block length, max price, and the
-  charge override, on top of clearing the schedule and any boost like Stop
-  does. Handy to wire to an automation that fires when your charger becomes
-  unplugged, so the next time you plug in you're starting completely fresh.
+  required, gamble tolerance, minimum block length, max price, assumed
+  charge kWh, and the charge override, on top of clearing the schedule and
+  any boost like Stop does. Handy to wire to an automation that fires when
+  your charger becomes unplugged, so the next time you plug in you're
+  starting completely fresh.
 
 **Manual override:**
 - **Charge override** (`select`: Auto / Force On / Force Off) — leave on
@@ -116,6 +122,10 @@ people won't need to touch them):
 - **Schedule** — the full list of upcoming charging sessions, with each
   session's start/end time, average price, and confidence.
 - **Next slot start / end** — when the next charging session begins and ends.
+- **Next slot average price** / **Next slot estimated cost** — the average
+  price of that upcoming session, and average price × assumed charge kWh as
+  a rough total cost estimate (same currency-agnostic caveat as max price —
+  see above).
 - **Hours remaining** / **Time remaining** — how much committed charging time
   is left.
 - **Charging desired** (`binary_sensor`) — the actual on/off signal; see

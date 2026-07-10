@@ -33,6 +33,8 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry, async_add_e
         EvChargingScheduleSensor(coordinator),
         EvChargingNextSlotStartSensor(coordinator),
         EvChargingNextSlotEndSensor(coordinator),
+        EvChargingNextSlotAveragePriceSensor(coordinator),
+        EvChargingNextSlotEstimatedCostSensor(coordinator),
         EvChargingHoursRemainingSensor(coordinator),
         EvChargingTimeRemainingSensor(coordinator),
         EvChargingBoostEndsAtSensor(coordinator),
@@ -63,6 +65,13 @@ def _price_summary(coordinator: WholesaleEvScheduleCoordinator) -> dict:
     if not coordinator.data:
         return {}
     return coordinator.data.get("price_summary") or {}
+
+
+def _next_slot_average_price(coordinator: WholesaleEvScheduleCoordinator) -> float | None:
+    if not coordinator.data:
+        return None
+    next_slot = coordinator.data.get("next_slot")
+    return next_slot["avg_price"] if next_slot else None
 
 
 # =============================================================================
@@ -158,6 +167,41 @@ class EvChargingNextSlotEndSensor(WholesaleEvScheduleEntity, SensorEntity):
             return None
         next_slot = self.coordinator.data.get("next_slot")
         return parse_dt(next_slot["end"]) if next_slot else None
+
+
+class EvChargingNextSlotAveragePriceSensor(WholesaleEvScheduleEntity, SensorEntity):
+    """Average price of the next scheduled slot. None when nothing's scheduled."""
+
+    _attr_translation_key = "next_slot_average_price"
+    _attr_icon = "mdi:cash"
+    _attr_state_class = SensorStateClass.MEASUREMENT
+
+    def __init__(self, coordinator: WholesaleEvScheduleCoordinator) -> None:
+        super().__init__(coordinator, "sensor", "next_slot_average_price")
+
+    @property
+    def native_value(self) -> float | None:
+        return _next_slot_average_price(self.coordinator)
+
+
+class EvChargingNextSlotEstimatedCostSensor(WholesaleEvScheduleEntity, SensorEntity):
+    """Next slot's average price × assumed_charge_kwh — a rough estimate only,
+    since this integration never knows actual delivered energy. Same price
+    unit as average price / max price (no currency conversion applied)."""
+
+    _attr_translation_key = "next_slot_estimated_cost"
+    _attr_icon = "mdi:receipt-text-outline"
+    _attr_state_class = SensorStateClass.MEASUREMENT
+
+    def __init__(self, coordinator: WholesaleEvScheduleCoordinator) -> None:
+        super().__init__(coordinator, "sensor", "next_slot_estimated_cost")
+
+    @property
+    def native_value(self) -> float | None:
+        avg_price = _next_slot_average_price(self.coordinator)
+        if avg_price is None:
+            return None
+        return round(avg_price * self.coordinator.assumed_charge_kwh, 2)
 
 
 class EvChargingHoursRemainingSensor(WholesaleEvScheduleEntity, SensorEntity):
