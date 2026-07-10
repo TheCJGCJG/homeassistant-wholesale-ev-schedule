@@ -103,6 +103,21 @@ def test_compute_effective_price_clamps_above_100_instead_of_inverting_ranking()
     assert predicted == pytest.approx(10.0)  # clamped to 100 => eff_cred=1.0 => face value, same as actual
 
 
+def test_compute_effective_price_clamps_below_0_instead_of_dividing_by_zero():
+    # Regression for issue #42. For any predicted tier, eff_cred crosses zero
+    # at gamble_tolerance = -100 * base_cred / (1 - base_cred) (e.g. -66.67
+    # for TIER_PREDICTED_72_PLUS) -- previously an unhandled ZeroDivisionError
+    # at that exact point, and a negative/wildly-amplified price either side
+    # of it. Fixed by the same [0, 100] clamp added for #41: any negative
+    # gamble_tolerance now clamps to 0 (the "fully discount predictions"
+    # end of the documented range), never reaching eff_cred <= 0.
+    price = compute_effective_price(10.0, TIER_PREDICTED_72_PLUS, gamble_tolerance=-66.666666666666666)
+    assert price == pytest.approx(10.0 / BASE_CREDIBILITY[TIER_PREDICTED_72_PLUS])  # same as gamble_tolerance=0
+
+    for tolerance in (-1000.0, -300.0, -66.666666666666666, -1.0):
+        assert compute_effective_price(10.0, TIER_PREDICTED_72_PLUS, tolerance) > 0
+
+
 def test_assign_credibilities_adds_tier_and_effective_price():
     slots = make_slots(NOW, 2, source="predicted")
     result = assign_credibilities(slots, NOW, gamble_tolerance=50.0)
