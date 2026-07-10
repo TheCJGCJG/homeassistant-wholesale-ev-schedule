@@ -5,6 +5,7 @@ without any hass fixture — same approach as the upstream pyscript's test suite
 this module was ported from.
 """
 
+import time
 from datetime import datetime, timedelta, timezone
 from zoneinfo import ZoneInfo
 
@@ -404,6 +405,27 @@ def test_find_optimal_slots_max_block_hours_zero_means_unlimited():
 
     sessions = build_contiguous_runs(sorted(result, key=lambda s: s["date_time"]))
     assert len(sessions) == 1
+
+
+def test_find_optimal_slots_stays_fast_with_a_large_window_and_run():
+    # Regression guard for issue #45. Window construction (price sums, plus
+    # the slots-list/dts-set materialized per candidate window) was
+    # previously O(size) per window, making this call ~1.1-1.8s depending on
+    # exactly what was fixed along the way. With window generation genuinely
+    # O(1) per window (prefix sums for the price sums, deferring date_time
+    # resolution to only the handful of actually-selected windows), the same
+    # call now completes in well under 0.05s -- a 0.5s ceiling still comfortably
+    # catches a regression back toward the old per-window-O(size) behavior
+    # without being flaky on slow CI runners.
+    run = make_slots(NOW, 900, price=1.0)
+    slots = assign_credibilities(run, NOW, gamble_tolerance=100.0)
+
+    start = time.perf_counter()
+    result = find_optimal_slots(slots, required_slots=225, ready_by_dt=NOW + timedelta(hours=500), min_block_hours=1.0)
+    elapsed = time.perf_counter() - start
+
+    assert len(result) == 225
+    assert elapsed < 0.5
 
 
 def test_slots_to_sessions_groups_contiguous_runs():
