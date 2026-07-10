@@ -1,7 +1,9 @@
 # Developing Wholesale EV Schedule
 
 Technical/contributor documentation. For what the integration does and how
-to set it up, see [README.md](README.md).
+to set it up, see [README.md](README.md). If you're an AI coding agent,
+start at [AGENTS.md](AGENTS.md) instead — it covers repo-specific workflow
+conventions this file doesn't repeat.
 
 ## Structure
 
