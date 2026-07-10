@@ -145,23 +145,34 @@ def find_optimal_slots(
 
     windows.sort(key=lambda w: w["avg_eff"])
 
-    # Greedy selection: cheapest non-overlapping windows summing to required_slots.
-    # After each pick the remainder must be 0 or >= min_slots_per_block so it can
-    # always be filled with another full-sized block.
-    selected_dts: set = set()
-    remaining = required_slots
-    for w in windows:
-        if w["size"] > remaining:
-            continue
-        after = remaining - w["size"]
-        if after > 0 and after < min_slots_per_block:
-            continue
-        if w["dts"] & selected_dts:
-            continue
-        selected_dts |= w["dts"]
-        remaining -= w["size"]
-        if remaining == 0:
-            break
+    def _greedy_select(strict: bool) -> tuple[set, int]:
+        # Cheapest non-overlapping windows summing to required_slots. In strict mode,
+        # after each pick the remainder must be 0 or >= min_slots_per_block so it can
+        # always be filled with another full-sized block.
+        dts: set = set()
+        left = required_slots
+        for w in windows:
+            if w["size"] > left:
+                continue
+            after = left - w["size"]
+            if strict and after > 0 and after < min_slots_per_block:
+                continue
+            if w["dts"] & dts:
+                continue
+            dts |= w["dts"]
+            left -= w["size"]
+            if left == 0:
+                break
+        return dts, left
+
+    selected_dts, remaining = _greedy_select(strict=True)
+    if remaining == required_slots and windows:
+        # Strict selection made zero progress -- e.g. required_slots is split across
+        # separate runs that are each too short to leave a full-size remainder on
+        # their own (see issue #23). Rather than report unschedulable outright, relax
+        # the "leave a neat remainder" preference so at least one window gets picked,
+        # and let the leftover-fallback below top up whatever's left.
+        selected_dts, remaining = _greedy_select(strict=False)
 
     # Relaxed fallback: top up any small remainder with the cheapest leftover slots
     # from valid runs (the last block may end up shorter than min_block_hours).

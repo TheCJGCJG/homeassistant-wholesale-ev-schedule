@@ -226,6 +226,30 @@ def test_find_optimal_slots_skips_a_window_too_large_for_the_remaining_need():
     assert run_b[2]["date_time"] not in result_dts
 
 
+def test_find_optimal_slots_disjoint_runs_each_too_short_for_a_neat_remainder():
+    # Regression for issue #23. Two disjoint 2-slot runs (1h each), required=3
+    # slots, min_block_hours=1h (min_slots_per_block=2). Picking either run
+    # alone would leave a 1-slot remainder, smaller than min_slots_per_block,
+    # so the strict pass's "leave 0 or a full block" guard rejects both --
+    # making zero progress, since no arrangement of *whole* runs can satisfy
+    # that guard here. Previously this made the relaxed leftover-fallback
+    # unreachable too (it only fires once something's already been picked),
+    # so the function returned [] even though scheduling one full run plus one
+    # leftover slot from the other is a perfectly legitimate 3-slot answer.
+    run_a = make_slots(NOW, 2, price=1.0)
+    run_b_start = NOW + timedelta(hours=5)
+    run_b = make_slots(run_b_start, 2, price=2.0)
+    slots = assign_credibilities(run_a + run_b, NOW, gamble_tolerance=100.0)
+
+    result = find_optimal_slots(slots, required_slots=3, ready_by_dt=NOW + timedelta(hours=10), min_block_hours=1.0)
+
+    result_dts = {s["date_time"] for s in result}
+    assert len(result_dts) == 3
+    # The cheaper run (run_a) is taken in full, plus the cheapest single slot
+    # from run_b to top up the remainder.
+    assert result_dts == {run_a[0]["date_time"], run_a[1]["date_time"], run_b[0]["date_time"]}
+
+
 def test_find_optimal_slots_caps_individual_window_size_with_max_block_hours():
     # A single uniformly-cheap 4-slot (2h) run, required=4 slots, capped at 1h
     # (2 slots) per block. The cap limits how large any one *window* can be
