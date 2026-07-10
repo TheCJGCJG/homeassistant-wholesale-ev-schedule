@@ -200,7 +200,16 @@ class EvChargingNextSlotAveragePriceSensor(WholesaleEvScheduleEntity, SensorEnti
 class EvChargingNextSlotEstimatedCostSensor(WholesaleEvScheduleEntity, SensorEntity):
     """Next slot's average price × assumed_charge_kwh — a rough estimate only,
     since this integration never knows actual delivered energy. Same price
-    unit as average price / max price (no currency conversion applied)."""
+    unit as average price / max price (no currency conversion applied).
+
+    There's deliberately no fixed native_unit_of_measurement here (or on
+    average price/max price) since the price unit depends entirely on the
+    user's configured rate_unit_multiplier -- could be £/kWh, p/kWh, or
+    anything else. That leaves the bare number with no visible context on a
+    dashboard (issue #22: "89.32... what?"), so extra_state_attributes below
+    exposes the inputs that produced it -- visible in HA's "more info" dialog
+    without needing a fixed unit this integration can't actually know.
+    """
 
     _attr_translation_key = "next_slot_estimated_cost"
     _attr_icon = "mdi:receipt-text-outline"
@@ -215,6 +224,14 @@ class EvChargingNextSlotEstimatedCostSensor(WholesaleEvScheduleEntity, SensorEnt
         if avg_price is None:
             return None
         return round(avg_price * self.coordinator.assumed_charge_kwh, 2)
+
+    @property
+    def extra_state_attributes(self) -> dict:
+        return {
+            "next_slot_average_price": _next_slot_average_price(self.coordinator),
+            "assumed_charge_kwh": self.coordinator.assumed_charge_kwh,
+            "calculation": "next_slot_average_price × assumed_charge_kwh",
+        }
 
 
 class EvChargingHoursRemainingSensor(WholesaleEvScheduleEntity, SensorEntity):
