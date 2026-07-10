@@ -7,12 +7,16 @@ automatically; picking "custom" asks for it directly, so an unmodelled
 wholesale price source can still be wired up.
 
 Scheduling tolerances (gamble tolerance, min/max block hours, max price) and
-the manual charge_override deliberately aren't here — they're live
+the manual charge_override deliberately aren't here as *live* values — they're
 `number`/`select` entities (see coordinator.py, number.py, select.py) since
 they're the kind of thing you adjust day-to-day, not a one-time setup choice.
-There's also deliberately no "charger state entity" wiring: charging_desired
-is computed purely from the schedule and the manual override, independent of
-any particular charger's own state, so this integration doesn't need to know
+`base_schema` does include a matching set of *default* fields (e.g.
+default_gamble_tolerance) — these only control what a fresh install starts
+with and what those live entities reset back to when "Reset" is pressed; they
+never change a live value directly (see coordinator.py). There's also
+deliberately no "charger state entity" wiring: charging_desired is computed
+purely from the schedule and the manual override, independent of any
+particular charger's own state, so this integration doesn't need to know
 anything about your charger brand.
 """
 from __future__ import annotations
@@ -29,6 +33,12 @@ from homeassistant.util import slugify
 
 from .const import (
     CONF_CURRENT_RATES_ENTITY,
+    CONF_DEFAULT_GAMBLE_TOLERANCE,
+    CONF_DEFAULT_MAX_PRICE,
+    CONF_DEFAULT_MIN_BLOCK_HOURS,
+    CONF_DEFAULT_READY_BY_DAY_OFFSET,
+    CONF_DEFAULT_READY_BY_HOUR,
+    CONF_DEFAULT_REQUIRED_HOURS,
     CONF_FORECAST_ATTRIBUTE,
     CONF_FORECAST_DATETIME_KEY,
     CONF_FORECAST_ENTITY,
@@ -42,8 +52,14 @@ from .const import (
     CONF_RATES_ATTRIBUTE,
     CONF_RATES_PROVIDER,
     CONF_UPDATE_INTERVAL_MINUTES,
+    DEFAULT_GAMBLE_TOLERANCE,
+    DEFAULT_MAX_PRICE,
+    DEFAULT_MIN_BLOCK_HOURS,
     DEFAULT_NAME,
     DEFAULT_RATE_UNIT_MULTIPLIER,
+    DEFAULT_READY_BY_DAY_OFFSET,
+    DEFAULT_READY_BY_HOUR,
+    DEFAULT_REQUIRED_HOURS,
     DEFAULT_UPDATE_INTERVAL_MINUTES,
     DOMAIN,
 )
@@ -78,6 +94,18 @@ def _provider_select(options: dict[str, dict]) -> selector.SelectSelector:
     ))
 
 
+# "Next day" (0) / "Next day + 1/2/3" — how many days ahead of "as soon as
+# possible" the default ready_by should be pushed. See
+# CONF_DEFAULT_READY_BY_DAY_OFFSET in const.py and scheduler.next_ready_by.
+# Option labels live in strings.json/translations under
+# selector.default_ready_by_day_offset.options.
+_READY_BY_DAY_OFFSET_SELECT = selector.SelectSelector(selector.SelectSelectorConfig(
+    options=["0", "1", "2", "3"],
+    mode=selector.SelectSelectorMode.DROPDOWN,
+    translation_key="default_ready_by_day_offset",
+))
+
+
 def base_schema(defaults: dict[str, Any], include_name: bool) -> vol.Schema:
     schema: dict[Any, Any] = {}
     if include_name:
@@ -95,6 +123,34 @@ def base_schema(defaults: dict[str, Any], include_name: bool) -> vol.Schema:
         _with_default(
             CONF_FORECAST_PROVIDER, defaults, FORECAST_PROVIDER_AGILE_PREDICT
         ): _provider_select(FORECAST_PROVIDERS),
+        # Setup-time defaults: what a fresh install starts with and what the
+        # "Reset" button restores every live value to — not the live values
+        # themselves (see coordinator.py).
+        _with_default(
+            CONF_DEFAULT_REQUIRED_HOURS, defaults, DEFAULT_REQUIRED_HOURS
+        ): selector.NumberSelector(
+            selector.NumberSelectorConfig(min=0, max=24, step=0.5, mode=selector.NumberSelectorMode.BOX)
+        ),
+        _with_default(
+            CONF_DEFAULT_GAMBLE_TOLERANCE, defaults, DEFAULT_GAMBLE_TOLERANCE
+        ): selector.NumberSelector(
+            selector.NumberSelectorConfig(min=0, max=100, step=1, mode=selector.NumberSelectorMode.BOX)
+        ),
+        _with_default(CONF_DEFAULT_MAX_PRICE, defaults, DEFAULT_MAX_PRICE): selector.NumberSelector(
+            selector.NumberSelectorConfig(min=0, max=200, step=0.1, mode=selector.NumberSelectorMode.BOX)
+        ),
+        _with_default(
+            CONF_DEFAULT_MIN_BLOCK_HOURS, defaults, DEFAULT_MIN_BLOCK_HOURS
+        ): selector.NumberSelector(
+            selector.NumberSelectorConfig(min=0, max=24, step=0.5, mode=selector.NumberSelectorMode.BOX)
+        ),
+        _with_default(CONF_DEFAULT_READY_BY_HOUR, defaults, DEFAULT_READY_BY_HOUR): selector.NumberSelector(
+            selector.NumberSelectorConfig(min=0, max=23, step=1, mode=selector.NumberSelectorMode.BOX)
+        ),
+        vol.Required(
+            CONF_DEFAULT_READY_BY_DAY_OFFSET,
+            default=str(defaults.get(CONF_DEFAULT_READY_BY_DAY_OFFSET, DEFAULT_READY_BY_DAY_OFFSET)),
+        ): _READY_BY_DAY_OFFSET_SELECT,
     })
     return vol.Schema(schema)
 

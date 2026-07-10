@@ -9,6 +9,12 @@ from pytest_homeassistant_custom_component.common import MockConfigEntry
 
 from custom_components.wholesale_ev_schedule.const import (
     CONF_CURRENT_RATES_ENTITY,
+    CONF_DEFAULT_GAMBLE_TOLERANCE,
+    CONF_DEFAULT_MAX_PRICE,
+    CONF_DEFAULT_MIN_BLOCK_HOURS,
+    CONF_DEFAULT_READY_BY_DAY_OFFSET,
+    CONF_DEFAULT_READY_BY_HOUR,
+    CONF_DEFAULT_REQUIRED_HOURS,
     CONF_FORECAST_ATTRIBUTE,
     CONF_FORECAST_DATETIME_KEY,
     CONF_FORECAST_ENTITY,
@@ -22,7 +28,13 @@ from custom_components.wholesale_ev_schedule.const import (
     CONF_RATES_ATTRIBUTE,
     CONF_RATES_PROVIDER,
     CONF_UPDATE_INTERVAL_MINUTES,
+    DEFAULT_GAMBLE_TOLERANCE,
+    DEFAULT_MAX_PRICE,
+    DEFAULT_MIN_BLOCK_HOURS,
     DEFAULT_NAME,
+    DEFAULT_READY_BY_DAY_OFFSET,
+    DEFAULT_READY_BY_HOUR,
+    DEFAULT_REQUIRED_HOURS,
     DEFAULT_UPDATE_INTERVAL_MINUTES,
     DOMAIN,
 )
@@ -63,7 +75,11 @@ _agile_predict_profile = FORECAST_PROVIDERS[FORECAST_PROVIDER_AGILE_PREDICT]
 # The fully-resolved options dict a real flow through BASE_INPUT ->
 # RATES_OCTOPUS_INPUT -> FORECAST_AGILE_PREDICT_INPUT would produce — used to
 # set up a config entry directly, bypassing the flow, for tests that only
-# care about the coordinator/entities.
+# care about the coordinator/entities. Since BASE_INPUT doesn't set any of the
+# CONF_DEFAULT_* setup-time-default fields (see const.py), a real flow leaves
+# them at the schema's own defaults — which are the pre-existing DEFAULT_*
+# constants (0 for the day offset), so this is identical to how a fresh
+# install behaved before that feature existed.
 FULL_OPTIONS = {
     **BASE_INPUT,
     **RATES_OCTOPUS_INPUT,
@@ -76,6 +92,12 @@ FULL_OPTIONS = {
     CONF_FORECAST_DATETIME_KEY: _agile_predict_profile["datetime_key"],
     CONF_FORECAST_PRICE_KEY: _agile_predict_profile["price_key"],
     CONF_FORECAST_UNIT_MULTIPLIER: _agile_predict_profile["unit_multiplier"],
+    CONF_DEFAULT_REQUIRED_HOURS: DEFAULT_REQUIRED_HOURS,
+    CONF_DEFAULT_GAMBLE_TOLERANCE: DEFAULT_GAMBLE_TOLERANCE,
+    CONF_DEFAULT_MAX_PRICE: DEFAULT_MAX_PRICE,
+    CONF_DEFAULT_MIN_BLOCK_HOURS: DEFAULT_MIN_BLOCK_HOURS,
+    CONF_DEFAULT_READY_BY_HOUR: DEFAULT_READY_BY_HOUR,
+    CONF_DEFAULT_READY_BY_DAY_OFFSET: str(DEFAULT_READY_BY_DAY_OFFSET),
 }
 
 _ENTITY_SUFFIXES = {

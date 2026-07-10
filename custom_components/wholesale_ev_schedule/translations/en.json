@@ -3,12 +3,18 @@
     "step": {
       "user": {
         "title": "Set up Wholesale EV Schedule",
-        "description": "Give this instance a unique name if you're setting up more than one (e.g. per car) — it becomes the entity_id prefix. Pick which service supplies your actual and forecast wholesale prices; \"Custom\" lets you point at an unsupported source directly. Scheduling tolerances (gamble tolerance, block length, max price) and the manual charge override are set afterwards as live entities, not here.",
+        "description": "Give this instance a unique name if you're setting up more than one (e.g. per car) — it becomes the entity_id prefix. Pick which service supplies your actual and forecast wholesale prices; \"Custom\" lets you point at an unsupported source directly. Scheduling tolerances (gamble tolerance, block length, max price) and the manual charge override are set afterwards as live entities, not here — the \"Default...\" fields below only control what those live entities start out as, and what the Reset button restores them to.",
         "data": {
           "name": "Name",
           "update_interval_minutes": "Re-evaluate every (minutes)",
           "rates_provider": "Actual rates source",
-          "forecast_provider": "Forecast source"
+          "forecast_provider": "Forecast source",
+          "default_required_hours": "Default charging hours required",
+          "default_gamble_tolerance": "Default gamble tolerance",
+          "default_max_price": "Default maximum price",
+          "default_min_block_hours": "Default minimum block length",
+          "default_ready_by_hour": "Default ready-by hour",
+          "default_ready_by_day_offset": "Default ready-by day"
         },
         "data_description": {
           "update_interval_minutes": "How often prices are re-fetched and the full schedule recomputed. Charging desired also re-evaluates every minute on the clock regardless of this setting, so on/off transitions always land within about a minute of the real slot boundary."
@@ -57,6 +63,16 @@
       "already_configured": "An instance with this name (or its slugified entity_id prefix) is already configured. Choose a different name."
     }
   },
+  "selector": {
+    "default_ready_by_day_offset": {
+      "options": {
+        "0": "Next day",
+        "1": "Next day + 1",
+        "2": "Next day + 2",
+        "3": "Next day + 3"
+      }
+    }
+  },
   "options": {
     "step": {
       "init": {
@@ -64,7 +80,13 @@
         "data": {
           "update_interval_minutes": "Re-evaluate every (minutes)",
           "rates_provider": "Actual rates source",
-          "forecast_provider": "Forecast source"
+          "forecast_provider": "Forecast source",
+          "default_required_hours": "Default charging hours required",
+          "default_gamble_tolerance": "Default gamble tolerance",
+          "default_max_price": "Default maximum price",
+          "default_min_block_hours": "Default minimum block length",
+          "default_ready_by_hour": "Default ready-by hour",
+          "default_ready_by_day_offset": "Default ready-by day"
         },
         "data_description": {
           "update_interval_minutes": "How often prices are re-fetched and the full schedule recomputed. Charging desired also re-evaluates every minute on the clock regardless of this setting, so on/off transitions always land within about a minute of the real slot boundary."

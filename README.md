@@ -60,6 +60,15 @@ Schedule**. You'll be asked for:
    the same API shape — see the
    [AgilePredict HA guide](https://agilepredict.com/v2/api_how_to/)), "Custom"
    for something else, or "None" to schedule from known/actual rates only.
+5. **Optional defaults** — default charging hours required, default gamble
+   tolerance, default maximum price, default minimum block length, and a
+   default ready-by (an hour, plus "Next day" / "Next day + 1" / "Next day +
+   2" / "Next day + 3" for how many days out it should land). These don't
+   affect the day-to-day live values described below directly — they only
+   set what a brand-new install starts with and what the **Reset** button
+   restores those live values to. Leave them alone for the same behaviour as
+   before (12h / 50% / 20 / 4h / next 7am). All are editable later from the
+   integration's **Configure** option.
 
 That's it for one-time setup. Everything else — how many hours you need,
 by when, and the scheduling tolerances below — is adjusted afterwards as
@@ -70,14 +79,15 @@ live entities, no reconfiguration needed.
 **Set these day-to-day** (both come with defaults so the integration does
 something sensible out of the box — see below):
 - **Ready by** (`datetime`) — when charging needs to be finished by. Defaults
-  to the next 7am, and **auto-rolls forward** to the following 7am once
-  reached — it's a standing daily target, not something you need to reset
-  every day. Set it manually any time you need a different deadline.
+  to the next 7am (configurable at setup time — see [Setup](#setup)), and
+  **auto-rolls forward** to the same default hour/day once reached — it's a
+  standing daily target, not something you need to reset every day. Set it
+  manually any time you need a different deadline.
 - **Charging hours required** (`number`) — how many hours of charging you
-  need. Defaults to 12. Set to 0 to go idle.
+  need. Defaults to 12 (configurable at setup time). Set to 0 to go idle.
 
-**Tune scheduling behaviour anytime** (these have sensible defaults, most
-people won't need to touch them):
+**Tune scheduling behaviour anytime** (these have sensible defaults,
+configurable at setup time, most people won't need to touch them):
 - **Gamble tolerance** (default 50%) — how much to trust predicted
   (not-yet-known) prices vs. discounting them in favour of known rates.
   Higher = more willing to bet on forecasts.
@@ -110,7 +120,9 @@ people won't need to touch them):
   charge kWh, and the charge override, on top of clearing the schedule and
   any boost like Stop does. Handy to wire to an automation that fires when
   your charger becomes unplugged, so the next time you plug in you're
-  starting completely fresh.
+  starting completely fresh. Which values Reset restores (other than assumed
+  charge kWh and the charge override, which are fixed) is controlled by the
+  optional defaults set at setup time — see [Setup](#setup) above.
 
 **Manual override:**
 - **Charge override** (`select`: Auto / Force On / Force Off) — leave on
