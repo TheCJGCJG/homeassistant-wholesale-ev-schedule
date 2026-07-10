@@ -33,8 +33,8 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry, async_add_e
         [
             EvChargingStateSensor(coordinator),
             EvChargingScheduleSensor(coordinator),
-            EvChargingNextSlotStartSensor(coordinator),
-            EvChargingNextSlotEndSensor(coordinator),
+            _SlotBoundaryTimeSensor(coordinator, "next_slot_start", "next_slot_start", "mdi:clock-start", "start"),
+            _SlotBoundaryTimeSensor(coordinator, "next_slot_end", "next_slot_end", "mdi:clock-end", "end"),
             EvChargingNextSlotAveragePriceSensor(coordinator),
             EvChargingNextSlotEstimatedCostSensor(coordinator),
             EvChargingHoursRemainingSensor(coordinator),
@@ -42,10 +42,18 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry, async_add_e
             EvChargingBoostEndsAtSensor(coordinator),
             # Diagnostics — hidden by default.
             EvChargingBlockCountSensor(coordinator),
-            EvChargingUpcomingBlock2StartSensor(coordinator),
-            EvChargingUpcomingBlock2EndSensor(coordinator),
-            EvChargingUpcomingBlock3StartSensor(coordinator),
-            EvChargingUpcomingBlock3EndSensor(coordinator),
+            _DiagnosticSlotBoundaryTimeSensor(
+                coordinator, "upcoming_block_2_start", "upcoming_block_2_start", "mdi:clock-start", "start", 1
+            ),
+            _DiagnosticSlotBoundaryTimeSensor(
+                coordinator, "upcoming_block_2_end", "upcoming_block_2_end", "mdi:clock-end", "end", 1
+            ),
+            _DiagnosticSlotBoundaryTimeSensor(
+                coordinator, "upcoming_block_3_start", "upcoming_block_3_start", "mdi:clock-start", "start", 2
+            ),
+            _DiagnosticSlotBoundaryTimeSensor(
+                coordinator, "upcoming_block_3_end", "upcoming_block_3_end", "mdi:clock-end", "end", 2
+            ),
             EvChargingCandidatePricePointsSensor(coordinator),
             EvChargingCheapestAvailablePriceSensor(coordinator),
             EvChargingMostExpensiveAvailablePriceSensor(coordinator),
@@ -137,40 +145,41 @@ class EvChargingScheduleSensor(WholesaleEvScheduleEntity, SensorEntity):
         }
 
 
-class EvChargingNextSlotStartSensor(WholesaleEvScheduleEntity, SensorEntity):
-    """ISO datetime of the next scheduled slot start."""
+class _SlotBoundaryTimeSensor(WholesaleEvScheduleEntity, SensorEntity):
+    """ISO datetime of a scheduled slot boundary (start or end).
 
-    _attr_translation_key = "next_slot_start"
-    _attr_icon = "mdi:clock-start"
+    Parameterized over which slot to read (the next slot, or one of the
+    upcoming_slots by index) and which boundary key to pull from it, since
+    next_slot_start/end and the diagnostic upcoming_block_N_start/end sensors
+    below were otherwise six near-identical classes differing only in these
+    values (see issue #30). slot_index=None means "the next slot"; an int
+    means upcoming_slots[slot_index] via _upcoming_slot.
+    """
+
     _attr_device_class = SensorDeviceClass.TIMESTAMP
 
-    def __init__(self, coordinator: WholesaleEvScheduleCoordinator) -> None:
-        super().__init__(coordinator, "sensor", "next_slot_start")
+    def __init__(
+        self,
+        coordinator: WholesaleEvScheduleCoordinator,
+        unique_id_suffix: str,
+        translation_key: str,
+        icon: str,
+        boundary_key: str,
+        slot_index: int | None = None,
+    ) -> None:
+        super().__init__(coordinator, "sensor", unique_id_suffix)
+        self._attr_translation_key = translation_key
+        self._attr_icon = icon
+        self._boundary_key = boundary_key
+        self._slot_index = slot_index
 
     @property
     def native_value(self) -> datetime | None:
-        if not self.coordinator.data:
-            return None
-        next_slot = self.coordinator.data.get("next_slot")
-        return parse_dt(next_slot["start"]) if next_slot else None
-
-
-class EvChargingNextSlotEndSensor(WholesaleEvScheduleEntity, SensorEntity):
-    """ISO datetime of the next scheduled slot end."""
-
-    _attr_translation_key = "next_slot_end"
-    _attr_icon = "mdi:clock-end"
-    _attr_device_class = SensorDeviceClass.TIMESTAMP
-
-    def __init__(self, coordinator: WholesaleEvScheduleCoordinator) -> None:
-        super().__init__(coordinator, "sensor", "next_slot_end")
-
-    @property
-    def native_value(self) -> datetime | None:
-        if not self.coordinator.data:
-            return None
-        next_slot = self.coordinator.data.get("next_slot")
-        return parse_dt(next_slot["end"]) if next_slot else None
+        if self._slot_index is None:
+            slot = self.coordinator.data.get("next_slot") if self.coordinator.data else None
+        else:
+            slot = _upcoming_slot(self.coordinator, self._slot_index)
+        return parse_dt(slot[self._boundary_key]) if slot else None
 
 
 class EvChargingNextSlotAveragePriceSensor(WholesaleEvScheduleEntity, SensorEntity):
@@ -293,68 +302,13 @@ class EvChargingBlockCountSensor(_DiagnosticSensor):
         return self.coordinator.data.get("block_count", 0)
 
 
-class EvChargingUpcomingBlock2StartSensor(_DiagnosticSensor):
-    """Start of the second upcoming block, when the schedule has more than one."""
+class _DiagnosticSlotBoundaryTimeSensor(_SlotBoundaryTimeSensor):
+    """The upcoming_block_N_start/end diagnostic variant of
+    _SlotBoundaryTimeSensor -- same behavior, just hidden-by-default and
+    categorized as diagnostic (see _DiagnosticSensor above)."""
 
-    _attr_translation_key = "upcoming_block_2_start"
-    _attr_icon = "mdi:clock-start"
-    _attr_device_class = SensorDeviceClass.TIMESTAMP
-
-    def __init__(self, coordinator: WholesaleEvScheduleCoordinator) -> None:
-        super().__init__(coordinator, "sensor", "upcoming_block_2_start")
-
-    @property
-    def native_value(self) -> datetime | None:
-        slot = _upcoming_slot(self.coordinator, 1)
-        return parse_dt(slot["start"]) if slot else None
-
-
-class EvChargingUpcomingBlock2EndSensor(_DiagnosticSensor):
-    """End of the second upcoming block, when the schedule has more than one."""
-
-    _attr_translation_key = "upcoming_block_2_end"
-    _attr_icon = "mdi:clock-end"
-    _attr_device_class = SensorDeviceClass.TIMESTAMP
-
-    def __init__(self, coordinator: WholesaleEvScheduleCoordinator) -> None:
-        super().__init__(coordinator, "sensor", "upcoming_block_2_end")
-
-    @property
-    def native_value(self) -> datetime | None:
-        slot = _upcoming_slot(self.coordinator, 1)
-        return parse_dt(slot["end"]) if slot else None
-
-
-class EvChargingUpcomingBlock3StartSensor(_DiagnosticSensor):
-    """Start of the third upcoming block, when the schedule has that many."""
-
-    _attr_translation_key = "upcoming_block_3_start"
-    _attr_icon = "mdi:clock-start"
-    _attr_device_class = SensorDeviceClass.TIMESTAMP
-
-    def __init__(self, coordinator: WholesaleEvScheduleCoordinator) -> None:
-        super().__init__(coordinator, "sensor", "upcoming_block_3_start")
-
-    @property
-    def native_value(self) -> datetime | None:
-        slot = _upcoming_slot(self.coordinator, 2)
-        return parse_dt(slot["start"]) if slot else None
-
-
-class EvChargingUpcomingBlock3EndSensor(_DiagnosticSensor):
-    """End of the third upcoming block, when the schedule has that many."""
-
-    _attr_translation_key = "upcoming_block_3_end"
-    _attr_icon = "mdi:clock-end"
-    _attr_device_class = SensorDeviceClass.TIMESTAMP
-
-    def __init__(self, coordinator: WholesaleEvScheduleCoordinator) -> None:
-        super().__init__(coordinator, "sensor", "upcoming_block_3_end")
-
-    @property
-    def native_value(self) -> datetime | None:
-        slot = _upcoming_slot(self.coordinator, 2)
-        return parse_dt(slot["end"]) if slot else None
+    _attr_entity_category = EntityCategory.DIAGNOSTIC
+    _attr_entity_registry_visible_default = False
 
 
 class EvChargingCandidatePricePointsSensor(_DiagnosticSensor):
