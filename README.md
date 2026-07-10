@@ -59,8 +59,18 @@ predicted price points works.
 
 ## Installation
 
-Copy `custom_components/wholesale_ev_schedule/` into your Home Assistant
-`config/custom_components/` directory, then restart Home Assistant.
+**Via [HACS](https://hacs.xyz/)** (recommended):
+
+[![Open your Home Assistant instance and open a repository inside the Home Assistant Community Store.](https://my.home-assistant.io/badges/hacs_repository.svg)](https://my.home-assistant.io/redirect/hacs_repository/?owner=TheCJGCJG&repository=homeassistant-wholesale-ev-schedule&category=integration)
+
+Or manually: HACS → Integrations → ⋮ → Custom repositories → add
+`https://github.com/TheCJGCJG/homeassistant-wholesale-ev-schedule` as an
+Integration.
+
+**Manually, without HACS**: copy `custom_components/wholesale_ev_schedule/`
+into your Home Assistant `config/custom_components/` directory.
+
+Either way, restart Home Assistant afterward.
 
 ## Setup
 
