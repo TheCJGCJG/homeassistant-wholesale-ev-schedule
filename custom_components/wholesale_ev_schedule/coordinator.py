@@ -186,9 +186,32 @@ class WholesaleEvScheduleCoordinator(DataUpdateCoordinator[dict]):
         self.max_price = data.get("max_price", self._default_max_price)
         self.charge_override = data.get("charge_override", DEFAULT_CHARGE_OVERRIDE)
         self.assumed_charge_kwh = data.get("assumed_charge_kwh", DEFAULT_ASSUMED_CHARGE_KWH)
-        self._stored_sessions = data.get("sessions", [])
+        self._stored_sessions = self._sanitize_stored_sessions(data.get("sessions", []))
         self._boost_end = self._parse_stored_dt(data.get("boost_end"), "boost_end")
         await self._async_save_stored_state()
+
+    def _sanitize_stored_sessions(self, raw: object) -> list[dict]:
+        """Drop any stored session that isn't a well-formed {start, end, ...} dict
+        -- schema drift, a manual edit, or a partial/interrupted write could
+        otherwise leave one that crashes prune_and_classify at coordinator-update
+        time rather than at load time (issue #34)."""
+        if not isinstance(raw, list):
+            if raw:
+                _LOGGER.warning("Stored sessions is not a list (%s); discarding", type(raw).__name__)
+            return []
+        sessions = []
+        for s in raw:
+            if not isinstance(s, dict):
+                _LOGGER.warning("Discarding malformed stored session (not a dict): %r", s)
+                continue
+            try:
+                parse_dt(s["start"])
+                parse_dt(s["end"])
+            except (KeyError, TypeError, ValueError) as err:
+                _LOGGER.warning("Discarding malformed stored session (%s): %r", err, s)
+                continue
+            sessions.append(s)
+        return sessions
 
     def _parse_stored_dt(self, value, field_name: str) -> datetime | None:
         """parse_dt a stored value, degrading to None (rather than raising) if it's

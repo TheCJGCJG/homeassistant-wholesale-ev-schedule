@@ -210,6 +210,48 @@ async def test_malformed_stored_boost_end_degrades_to_none_instead_of_crashing(h
     assert coordinator._boost_end is None
 
 
+async def test_stored_sessions_shaped_as_dict_is_discarded_instead_of_crashing(hass):
+    # Regression for issue #34. Iterating a dict yields its string keys, so
+    # `s["start"]` on a string previously raised an unhandled TypeError inside
+    # prune_and_classify the next time the coordinator ran an update.
+    entry = await async_setup_wholesale_entry(hass)
+    coordinator = hass.data[DOMAIN][entry.entry_id]
+    await coordinator._store.async_save({"sessions": {"start": "bogus"}})
+
+    await coordinator.async_load_stored_state()
+
+    assert coordinator._stored_sessions == []
+
+
+async def test_stored_session_missing_start_key_is_discarded_instead_of_crashing(hass):
+    # Regression for issue #34, the "list with a malformed entry" variant --
+    # a session missing "start" previously raised an unhandled KeyError.
+    entry = await async_setup_wholesale_entry(hass)
+    coordinator = hass.data[DOMAIN][entry.entry_id]
+    now = dt_util.now()
+    good_session = {"start": now.isoformat(), "end": (now + timedelta(hours=1)).isoformat(), "duration_hours": 1.0}
+    bad_session = {"end": (now + timedelta(hours=2)).isoformat()}
+    await coordinator._store.async_save({"sessions": [good_session, bad_session]})
+
+    await coordinator.async_load_stored_state()
+
+    assert coordinator._stored_sessions == [good_session]
+
+
+async def test_stored_session_list_containing_a_bare_string_is_discarded_instead_of_crashing(hass):
+    # Regression for issue #34, a list whose entries are the wrong type
+    # entirely (not dicts at all).
+    entry = await async_setup_wholesale_entry(hass)
+    coordinator = hass.data[DOMAIN][entry.entry_id]
+    now = dt_util.now()
+    good_session = {"start": now.isoformat(), "end": (now + timedelta(hours=1)).isoformat(), "duration_hours": 1.0}
+    await coordinator._store.async_save({"sessions": [good_session, "not-a-session"]})
+
+    await coordinator.async_load_stored_state()
+
+    assert coordinator._stored_sessions == [good_session]
+
+
 async def test_ready_by_in_the_past_rolls_forward_instead_of_erroring(hass):
     entry = await async_setup_wholesale_entry(hass)
     coordinator = hass.data[DOMAIN][entry.entry_id]
