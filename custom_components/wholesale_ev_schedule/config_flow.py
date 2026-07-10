@@ -295,17 +295,25 @@ class WholesaleEvScheduleConfigFlow(_ProviderStepsMixin, ConfigFlow, domain=DOMA
         self._name: str = DEFAULT_NAME
 
     async def async_step_user(self, user_input: dict[str, Any] | None = None):
+        errors: dict[str, str] = {}
         if user_input is not None:
-            name = user_input.pop(CONF_NAME)
-            # The slugified name becomes the entity_id prefix — enforce
-            # uniqueness so two instances can never collide on entity_ids.
-            await self.async_set_unique_id(slugify(name))
-            self._abort_if_unique_id_configured()
+            name = user_input.pop(CONF_NAME).strip()
+            # A blank (or whitespace-only) name slugifies to "" (see issue
+            # #28), producing an invalid, prefix-less entity_id for every
+            # entity and defeating the collision guarantee below entirely --
+            # reject it here instead of letting it reach async_set_unique_id.
+            if not name or not slugify(name):
+                errors[CONF_NAME] = "blank_name"
+            else:
+                # The slugified name becomes the entity_id prefix — enforce
+                # uniqueness so two instances can never collide on entity_ids.
+                await self.async_set_unique_id(slugify(name))
+                self._abort_if_unique_id_configured()
 
-            self._name = name
-            return await self._async_after_base_step(user_input)
+                self._name = name
+                return await self._async_after_base_step(user_input)
 
-        return self.async_show_form(step_id="user", data_schema=base_schema({}, include_name=True))
+        return self.async_show_form(step_id="user", data_schema=base_schema({}, include_name=True), errors=errors)
 
     async def _async_finish(self, options: dict[str, Any]):
         return self.async_create_entry(title=self._name, data={CONF_NAME: self._name}, options=options)

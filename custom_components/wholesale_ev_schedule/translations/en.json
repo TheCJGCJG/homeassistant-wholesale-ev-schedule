@@ -61,6 +61,9 @@
     },
     "abort": {
       "already_configured": "An instance with this name (or its slugified entity_id prefix) is already configured. Choose a different name."
+    },
+    "error": {
+      "blank_name": "Name can't be blank — it's used to build every entity_id for this instance."
     }
   },
   "selector": {
