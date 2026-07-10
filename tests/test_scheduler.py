@@ -512,6 +512,18 @@ def test_compute_hours_remaining_counts_partial_active_plus_future():
     assert remaining == pytest.approx(1.5)
 
 
+def test_compute_hours_remaining_derives_future_duration_from_start_end_not_stored_field():
+    # Regression for issue #44. A future session with start/end one hour
+    # apart but a stale duration_hours=5.0 (drifted from a partial write, a
+    # manual edit, or a future schema change that stops keeping the two in
+    # sync) must contribute its true 1h duration, not the stale field --
+    # consistent with the active-session branch, which already derives from
+    # end/now_dt rather than trusting a stored field.
+    drifted_future = _session(NOW + timedelta(hours=1), NOW + timedelta(hours=2), duration_hours=5.0)
+    remaining = compute_hours_remaining([drifted_future], None, NOW)
+    assert remaining == pytest.approx(1.0)
+
+
 def test_compute_hours_remaining_zero_when_nothing_scheduled():
     assert compute_hours_remaining([], None, NOW) == 0.0
 

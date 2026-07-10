@@ -288,13 +288,22 @@ def prune_and_classify(sessions: list[dict], now_dt: datetime) -> tuple[dict | N
 
 def compute_hours_remaining(future_sessions: list[dict], active_session: dict | None, now_dt: datetime) -> float:
     """Total uncommenced committed charging time: remaining portion of the active
-    session plus all future sessions in full."""
+    session plus all future sessions in full.
+
+    Both branches derive their duration from start/end, not a stored
+    duration_hours field -- the future-session branch used to trust
+    duration_hours verbatim, which could silently drift out of sync with the
+    session's own start/end (a partial write, a manual edit, a future schema
+    change) and corrupt this total with no crash to surface it (issue #44).
+    """
     total = 0.0
     if active_session:
         end = parse_dt(active_session["end"])
         total += max(0.0, (end - now_dt).total_seconds() / 3600)
     for s in future_sessions:
-        total += s.get("duration_hours", 0.0)
+        start = parse_dt(s["start"])
+        end = parse_dt(s["end"])
+        total += (end - start).total_seconds() / 3600
     return total
 
 
