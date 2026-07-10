@@ -121,21 +121,22 @@ All tests run inside Docker (`public.ecr.aws/docker/library/python:trixie`):
 ./run-tests.sh --shell      # interactive shell in the container
 ```
 
-108 tests, 97% branch coverage (100% on `config_flow.py`, `providers.py`,
-`button.py`, `select.py`):
-- `tests/test_scheduler.py` — unit tests for the pure scheduling algorithm, including max_block_hours splitting (the pure capability), next_ready_by, and the price-summary diagnostics
+157 tests, 98% branch coverage (100% on `config_flow.py`, `providers.py`,
+`button.py`, `select.py`, `number.py`, `entity.py`):
+- `tests/test_scheduler.py` — unit tests for the pure scheduling algorithm, including max_block_hours splitting (the pure capability), next_ready_by (including a DST spring-forward transition), and the price-summary diagnostics
 - `tests/test_integration_smoke.py` — full config/options flow, entity registration, idle vs error state on a fresh setup given the new defaults
-- `tests/test_providers.py` — custom rates/forecast provider branches, "no forecast" branch
-- `tests/test_multi_instance.py` — two instances with distinct names don't collide; duplicate-name/slug is rejected
+- `tests/test_providers.py` — custom rates/forecast provider branches, "no forecast" branch, blank custom attribute/key fields rejected, re-enabling forecast after "none"
+- `tests/test_multi_instance.py` — two instances with distinct names don't collide; duplicate-name/slug is rejected; blank name is rejected
 - `tests/test_entity_naming.py` — entity_id prefix guarantee, no collision with the pyscript original
 - `tests/test_price_parsing.py` — custom rate/forecast attribute & key names, unit multiplier, missing forecast entity, gamble tolerance
-- `tests/test_charge_override.py` — auto/force-on/force-off, including overriding an active slot or boost, and persistence across restarts
-- `tests/test_tolerances_and_reload.py` — max_price/min_block_hours enforcement, genuine multi-block scheduling without a max_block_hours knob, options-triggered reload picking up a changed update interval
+- `tests/test_charge_override.py` — auto/force-on/force-off, including overriding an active slot or boost, persistence across restarts, an invalid stored value degrading to auto
+- `tests/test_tolerances_and_reload.py` — max_price/min_block_hours enforcement, genuine multi-block scheduling without a max_block_hours knob, options-triggered reload picking up a changed update interval, unschedulable reason naming the actual cause
 - `tests/test_boost_stop.py` — boost start/self-reset, boost cancel, stop vs reset (reset restores every default), boost_ends_at visibility
 - `tests/test_diagnostics.py` — diagnostic sensors are hidden by default, price-summary diagnostics populate even when idle, block/upcoming-block sensors, live tuning number entities
-- `tests/test_edge_cases.py` — malformed price data, ready_by rolling forward instead of erroring once passed, active-session persistence across a price refresh, natural boost expiry
-- `tests/test_estimated_cost.py` — next-slot average price and the estimated-cost sensor derived from it via assumed_charge_kwh, including live updates when the number changes, persistence, and reset restoring its default
+- `tests/test_edge_cases.py` — malformed/missing/non-finite price data, malformed stored state (ready_by, boost_end, sessions, numeric tuning fields), ready_by rolling forward instead of erroring once passed, active-session persistence across a price refresh or a total price-data gap, natural boost expiry, NaN rejected at the live number-entity setter
+- `tests/test_estimated_cost.py` — next-slot average price and the estimated-cost sensor derived from it via assumed_charge_kwh, including live updates when the number changes, persistence, reset restoring its default, and the calculation breakdown exposed as attributes
 - `tests/test_minute_tick.py` — the wall-clock-aligned minute tick (`async_track_time_change` in `__init__.py`) triggers a coordinator refresh at the next :00 second boundary well before a full `update_interval_minutes` has elapsed, and its listener is torn down on unload
+- `tests/test_long_running_simulation.py` — continuous operation across several simulated days including a real DST transition (no crashes, ready_by keeps rolling over correctly), and a genuine unload+re-setup restart producing a brand-new coordinator instance that rehydrates fully from storage
 
 ## Linting and security scanning
 
