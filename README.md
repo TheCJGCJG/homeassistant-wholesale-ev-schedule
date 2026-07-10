@@ -46,7 +46,10 @@ Schedule**. You'll be asked for:
    for more than one car, give each one a distinct name (e.g. "Tesla EV
    Schedule").
 2. **How often to re-evaluate** — how frequently it re-checks prices and
-   recomputes the schedule (5 minutes is a sensible default).
+   recomputes the schedule (5 minutes is a sensible default). Charging
+   desired also re-evaluates every minute on the clock regardless of this
+   setting, so on/off transitions always land within about a minute of the
+   real slot boundary.
 3. **Where your actual rates come from** — pick "Octopus Energy" and select
    your current-day and next-day rates entities (found under Settings →
    Devices & services → Octopus Energy), or "Custom" to point at a different

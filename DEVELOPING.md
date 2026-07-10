@@ -53,6 +53,17 @@ custom_components/wholesale_ev_schedule/
   — see `_async_update_data` in `coordinator.py`. This makes "charge N hours
   by 7am" a standing daily target instead of something that errors out or
   needs resetting by hand.
+- **`async_setup_entry` (`__init__.py`) registers a wall-clock-aligned minute
+  tick via `async_track_time_change(hass, ..., second=0)`, in addition to the
+  coordinator's own `update_interval_minutes` polling.** A `DataUpdateCoordinator`'s
+  built-in timer fires at a fixed delta from whenever the coordinator was
+  constructed (integration setup/reload time), not from wall-clock minute
+  boundaries — so without this, `charging_desired` transitions land at an
+  arbitrary second offset (e.g. 10:03:04) and can lag a real slot boundary by
+  up to `update_interval_minutes`. The extra tick calls
+  `coordinator.async_request_refresh()` once a minute at :00 seconds so
+  schedule-driven state always catches up to a slot boundary within ~60s,
+  regardless of `update_interval_minutes`.
 
 ## Entity naming
 
@@ -90,7 +101,7 @@ All tests run inside Docker (`public.ecr.aws/docker/library/python:trixie`):
 ./run-tests.sh --shell      # interactive shell in the container
 ```
 
-106 tests, 97% branch coverage (100% on `config_flow.py`, `providers.py`,
+108 tests, 97% branch coverage (100% on `config_flow.py`, `providers.py`,
 `button.py`, `select.py`):
 - `tests/test_scheduler.py` — unit tests for the pure scheduling algorithm, including max_block_hours splitting (the pure capability), next_ready_by, and the price-summary diagnostics
 - `tests/test_integration_smoke.py` — full config/options flow, entity registration, idle vs error state on a fresh setup given the new defaults
@@ -104,6 +115,7 @@ All tests run inside Docker (`public.ecr.aws/docker/library/python:trixie`):
 - `tests/test_diagnostics.py` — diagnostic sensors are hidden by default, price-summary diagnostics populate even when idle, block/upcoming-block sensors, live tuning number entities
 - `tests/test_edge_cases.py` — malformed price data, ready_by rolling forward instead of erroring once passed, active-session persistence across a price refresh, natural boost expiry
 - `tests/test_estimated_cost.py` — next-slot average price and the estimated-cost sensor derived from it via assumed_charge_kwh, including live updates when the number changes, persistence, and reset restoring its default
+- `tests/test_minute_tick.py` — the wall-clock-aligned minute tick (`async_track_time_change` in `__init__.py`) triggers a coordinator refresh at the next :00 second boundary well before a full `update_interval_minutes` has elapsed, and its listener is torn down on unload
 
 ## CI / releases
 

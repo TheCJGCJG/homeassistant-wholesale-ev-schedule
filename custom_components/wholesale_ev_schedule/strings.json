@@ -9,6 +9,9 @@
           "update_interval_minutes": "Re-evaluate every (minutes)",
           "rates_provider": "Actual rates source",
           "forecast_provider": "Forecast source"
+        },
+        "data_description": {
+          "update_interval_minutes": "How often prices are re-fetched and the full schedule recomputed. Charging desired also re-evaluates every minute on the clock regardless of this setting, so on/off transitions always land within about a minute of the real slot boundary."
         }
       },
       "rates_octopus_energy": {
@@ -62,6 +65,9 @@
           "update_interval_minutes": "Re-evaluate every (minutes)",
           "rates_provider": "Actual rates source",
           "forecast_provider": "Forecast source"
+        },
+        "data_description": {
+          "update_interval_minutes": "How often prices are re-fetched and the full schedule recomputed. Charging desired also re-evaluates every minute on the clock regardless of this setting, so on/off transitions always land within about a minute of the real slot boundary."
         }
       },
       "rates_octopus_energy": {
