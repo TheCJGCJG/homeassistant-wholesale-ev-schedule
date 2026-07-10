@@ -172,11 +172,14 @@ class WholesaleEvScheduleCoordinator(DataUpdateCoordinator[dict]):
         ready_by defaults to the next self._default_ready_by_hour (at least
         self._default_ready_by_day_offset days out) if never set."""
         data = await self._store.async_load() or {}
-        self.ready_by = (
-            parse_dt(data["ready_by"])
-            if data.get("ready_by")
-            else next_ready_by(dt_util.now(), self._default_ready_by_hour, self._default_ready_by_day_offset)
-        )
+        # Stored JSON is only guaranteed well-formed by HA's Store helper (which
+        # handles outright corrupt/non-JSON files); a valid-JSON-but-wrong-shaped
+        # value here (schema drift, a manual edit) is our own responsibility. A
+        # malformed ready_by/boost_end degrades to "never set" rather than crashing
+        # setup entirely.
+        self.ready_by = self._parse_stored_dt(data.get("ready_by"), "ready_by")
+        if self.ready_by is None:
+            self.ready_by = next_ready_by(dt_util.now(), self._default_ready_by_hour, self._default_ready_by_day_offset)
         self.required_hours = data.get("required_hours", self._default_required_hours)
         self.gamble_tolerance = data.get("gamble_tolerance", self._default_gamble_tolerance)
         self.min_block_hours = data.get("min_block_hours", self._default_min_block_hours)
@@ -184,8 +187,19 @@ class WholesaleEvScheduleCoordinator(DataUpdateCoordinator[dict]):
         self.charge_override = data.get("charge_override", DEFAULT_CHARGE_OVERRIDE)
         self.assumed_charge_kwh = data.get("assumed_charge_kwh", DEFAULT_ASSUMED_CHARGE_KWH)
         self._stored_sessions = data.get("sessions", [])
-        self._boost_end = parse_dt(data["boost_end"]) if data.get("boost_end") else None
+        self._boost_end = self._parse_stored_dt(data.get("boost_end"), "boost_end")
         await self._async_save_stored_state()
+
+    def _parse_stored_dt(self, value, field_name: str) -> datetime | None:
+        """parse_dt a stored value, degrading to None (rather than raising) if it's
+        present but not a parseable datetime -- see async_load_stored_state."""
+        if not value:
+            return None
+        try:
+            return parse_dt(value)
+        except (TypeError, ValueError) as err:
+            _LOGGER.warning("Stored %s %r is invalid (%s); treating as unset", field_name, value, err)
+            return None
 
     async def _async_save_stored_state(self) -> None:
         await self._store.async_save(

@@ -94,6 +94,31 @@ async def test_forecast_attribute_explicitly_none_is_skipped_not_crashed(hass):
     assert coordinator.data["state"] in ("scheduled", "charging")
 
 
+async def test_malformed_stored_ready_by_degrades_to_default_instead_of_crashing(hass):
+    # Regression for issue #25. A valid-JSON-but-wrong-shaped ready_by (schema
+    # drift, a manual edit -- HA's own Store helper only protects against
+    # outright corrupt/non-JSON files) previously crashed async_load_stored_state
+    # with an unhandled ValueError, blocking setup entirely.
+    entry = await async_setup_wholesale_entry(hass)
+    coordinator = hass.data[DOMAIN][entry.entry_id]
+    await coordinator._store.async_save({"ready_by": "not-a-real-timestamp"})
+
+    await coordinator.async_load_stored_state()
+
+    assert coordinator.ready_by is not None
+
+
+async def test_malformed_stored_boost_end_degrades_to_none_instead_of_crashing(hass):
+    # Regression for issue #25, boost_end side.
+    entry = await async_setup_wholesale_entry(hass)
+    coordinator = hass.data[DOMAIN][entry.entry_id]
+    await coordinator._store.async_save({"boost_end": "not-a-real-timestamp"})
+
+    await coordinator.async_load_stored_state()
+
+    assert coordinator._boost_end is None
+
+
 async def test_ready_by_in_the_past_rolls_forward_instead_of_erroring(hass):
     entry = await async_setup_wholesale_entry(hass)
     coordinator = hass.data[DOMAIN][entry.entry_id]
