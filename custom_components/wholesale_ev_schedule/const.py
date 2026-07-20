@@ -76,6 +76,22 @@ CHARGE_OVERRIDE_FORCE_ON = "force_on"
 CHARGE_OVERRIDE_FORCE_OFF = "force_off"
 DEFAULT_CHARGE_OVERRIDE = CHARGE_OVERRIDE_AUTO
 
+# Which slot-selection algorithm find_optimal_slots uses (see scheduler.py).
+# "greedy" (the original implementation) picks the single cheapest window
+# first and fills any remainder from what's left, which is fast but can lose
+# to a different combination -- often one larger window -- whose combined
+# total is cheaper (issue #55). "optimal" replaces that with an exact search
+# that's always at least as cheap, at the cost of more compute on very long
+# price horizons. "hybrid" narrows the search to a handful of representative
+# window sizes per price run (always including the size that exactly covers
+# what's still needed) before searching exactly over that reduced set --
+# close to greedy's speed, much less likely to miss a cheaper single window,
+# but not guaranteed globally optimal the way "optimal" is.
+OPTIMIZATION_ALGORITHM_GREEDY = "greedy"
+OPTIMIZATION_ALGORITHM_OPTIMAL = "optimal"
+OPTIMIZATION_ALGORITHM_HYBRID = "hybrid"
+DEFAULT_OPTIMIZATION_ALGORITHM = OPTIMIZATION_ALGORITHM_GREEDY
+
 DEFAULT_GAMBLE_TOLERANCE = 50.0
 # The only block-length knob — a floor on how short a single charging block
 # may be, to avoid rapidly cycling the charger. 0 means no minimum at all.

@@ -14,6 +14,13 @@ from datetime import datetime, timedelta, timezone
 
 _LOGGER = logging.getLogger(__name__)
 
+# Mirrors const.py's OPTIMIZATION_ALGORITHM_* values, duplicated as plain string
+# literals rather than imported -- const.py pulls in homeassistant.const, which would
+# break this module's deliberate no-HA-dependency contract (see module docstring).
+OPTIMIZATION_ALGORITHM_GREEDY = "greedy"
+OPTIMIZATION_ALGORITHM_OPTIMAL = "optimal"
+OPTIMIZATION_ALGORITHM_HYBRID = "hybrid"
+
 TIER_ACTUAL = "actual"
 TIER_PREDICTED_0_24 = "predicted_0_24"
 TIER_PREDICTED_24_48 = "predicted_24_48"
@@ -90,7 +97,7 @@ def build_contiguous_runs(slots: list[dict]) -> list[list[dict]]:
     return runs
 
 
-def find_optimal_slots(
+def _find_optimal_slots_greedy(
     candidate_slots: list[dict],
     required_slots: int,
     ready_by_dt: datetime,
@@ -98,9 +105,14 @@ def find_optimal_slots(
     max_price: float | None = None,
     max_block_hours: float | None = None,
 ) -> list[dict]:
-    """Select the cheapest combination of slots totalling required_slots, where every
-    contiguous block is >= min_block_hours and (if max_price given) each block's average
-    raw price <= max_price. Returns a flat list of selected slot dicts, or [] if none.
+    """Original find_optimal_slots implementation (the "greedy" algorithm, see
+    OPTIMIZATION_ALGORITHM_GREEDY in const.py): picks the single cheapest window first
+    and fills any remainder from what's left. Fast, but can lose to a different
+    combination -- often one larger window -- whose combined total is cheaper, since it
+    only ever compares individual window averages against each other, never total cost
+    of one combination against another (issue #55). Kept as the default, unchanged,
+    alongside the exact `_find_optimal_slots_optimal` and narrowed-search
+    `_find_optimal_slots_hybrid` alternatives -- see `find_optimal_slots`.
 
     max_block_hours (if given and > 0) caps how long any single contiguous block may
     be — a cheap run longer than this is never offered as one big window, so when the
@@ -249,6 +261,441 @@ def find_optimal_slots(
     result = [s for s in eligible if s["date_time"] in selected_dts]
     result.sort(key=lambda s: s["date_time"])
     return result
+
+
+def _min_cost_for_run(
+    run: list[dict],
+    k_cap: int,
+    min_slots_per_block: int,
+    max_slots_per_block: int | None,
+    max_price: float | None,
+) -> tuple[list[float], list, list[int]]:
+    """DP over a single contiguous run: for every k in 0..k_cap, the minimum total
+    effective-price cost of selecting exactly k of the run's slots as a union of
+    disjoint contiguous blocks, each sized min_slots_per_block..max_slots_per_block
+    (unbounded above if max_slots_per_block is None) and (if max_price given) with raw
+    average <= max_price.
+
+    Returns (cost_by_k, history, end_state_by_k): cost_by_k[k] is math.inf if k is
+    unreachable; history[t] holds the backpointer choice made at run-index t for every
+    (k, state) cell reached there; end_state_by_k[k] is the state cost_by_k[k] was read
+    from. _reconstruct_run_selection replays these to recover which slots were picked.
+
+    The state machine tracks, per position, how many slots have been consumed in the
+    currently-open block (0 = not in a block). Once a block has consumed
+    min_slots_per_block slots it becomes "free" and may end at any point or keep
+    extending; states 1..min_slots_per_block-1 are "still mandatory" and must extend.
+    This keeps the per-position state count at max_slots_per_block+1 (or
+    min_slots_per_block+1 when unbounded, since every "free" length collapses to one
+    absorbing state) instead of re-deriving eligible block sizes from scratch at every
+    (position, k) cell, which would cost an extra O(block-size-range) factor -- this is
+    what makes an exact search over ALL combinations tractable (O(run_length * k_cap)
+    per run), unlike a naive DP that scans every block size at every cell.
+
+    max_price is checked only where a block's size is actually decided -- the "end"
+    transition (it stops growing) and the final cost_by_k scan (it's still open when the
+    run runs out) -- never while a block is still growing. An earlier version rejected
+    growth as soon as any intermediate prefix's average exceeded max_price, which
+    permanently closed off longer versions of the same block whose eventual average
+    would have been fine once diluted by more/cheaper slots later on -- e.g. a block
+    starting [30, 1] (avg 15.5, over a cap of 12) was rejected outright, even though
+    growing it to [30, 1, 1, 1, 1] (avg 6.8) is a valid, cheap block under the same cap.
+    """
+    n = len(run)
+    k_cap = min(n, k_cap)
+    lo = min_slots_per_block
+    unbounded = max_slots_per_block is None
+    hi = lo if unbounded else max_slots_per_block
+
+    raw_prefix = [0.0]
+    for s in run:
+        raw_prefix.append(raw_prefix[-1] + s["raw_price"])
+
+    OUT = 0
+    num_states = hi + 1  # OUT, plus "consumed c slots" for c in 1..hi
+
+    NEG = math.inf
+    dp = [[NEG] * num_states for _ in range(k_cap + 1)]
+    dp[0][OUT] = 0.0
+    history: list[list[list[tuple | None]]] = []
+
+    for t in range(n):
+        ndp = [[NEG] * num_states for _ in range(k_cap + 1)]
+        nchoice: list[list[tuple | None]] = [[None] * num_states for _ in range(k_cap + 1)]
+        price = run[t]["effective_price"]
+        for k in range(k_cap + 1):
+            row = dp[k]
+            for s in range(num_states):
+                val = row[s]
+                if val == NEG:
+                    continue
+                if s == OUT:
+                    if val < ndp[k][OUT]:
+                        ndp[k][OUT] = val
+                        nchoice[k][OUT] = ("skip", k, s)
+                    if k + 1 <= k_cap:
+                        # Growing a block is never rejected mid-flight -- max_price
+                        # constrains a block's FINAL average once it stops growing, not
+                        # every intermediate prefix along the way (a block that looks
+                        # expensive at its minimum size can still average under the cap
+                        # once diluted by more, cheaper slots later in the same block).
+                        # The check happens once, at the "end" transition below and in
+                        # the final cost_by_k scan, for whatever size the block actually
+                        # settles at -- not here.
+                        nxt = 1 if hi >= 1 else OUT
+                        cand = val + price
+                        if cand < ndp[k + 1][nxt]:
+                            ndp[k + 1][nxt] = cand
+                            nchoice[k + 1][nxt] = ("start", k, s)
+                    continue
+                c = s
+                is_free = c == lo if unbounded else c >= lo
+                if not is_free:
+                    # Still short of the minimum block size -- must extend, no choice to
+                    # end yet (see the OUT branch above for why max_price isn't checked
+                    # here either).
+                    if k + 1 <= k_cap:
+                        cand = val + price
+                        if cand < ndp[k + 1][c + 1]:
+                            ndp[k + 1][c + 1] = cand
+                            nchoice[k + 1][c + 1] = ("mand", k, s)
+                    continue
+                # Free: may end the block here (this position starts fresh as OUT) --
+                # this is the one point a block's size is actually decided, so it's the
+                # one point its average is checked against max_price.
+                block_ok = True
+                if max_price is not None:
+                    block_start = t - c
+                    raw_avg = (raw_prefix[t] - raw_prefix[block_start]) / c
+                    block_ok = raw_avg <= max_price
+                if block_ok and val < ndp[k][OUT]:
+                    ndp[k][OUT] = val
+                    nchoice[k][OUT] = ("end", k, s)
+                # ...or extend it, if a longer block is still allowed (again, not
+                # rejected here even if the average-so-far is over max_price -- only
+                # ending the block validates it).
+                can_extend = unbounded or c < hi
+                if can_extend and k + 1 <= k_cap:
+                    nxt_c = c if unbounded else c + 1
+                    cand = val + price
+                    if cand < ndp[k + 1][nxt_c]:
+                        ndp[k + 1][nxt_c] = cand
+                        nchoice[k + 1][nxt_c] = ("extend", k, s)
+        dp = ndp
+        history.append(nchoice)
+
+    cost_by_k = [NEG] * (k_cap + 1)
+    end_state_by_k: list[int] = [OUT] * (k_cap + 1)
+    for k in range(k_cap + 1):
+        best = dp[k][OUT]
+        best_state = OUT
+        for c in range(1, num_states):
+            is_free = c == lo if unbounded else c >= lo
+            if not is_free or dp[k][c] >= best:
+                continue
+            # A block still open (free, never explicitly ended) when the run runs out
+            # of slots is implicitly "ended" here, at the run boundary -- the same
+            # max_price check the "end" transition applies during the main loop, since
+            # this is the other (only) place a block's size is finally decided.
+            if max_price is not None:
+                block_start = n - c
+                raw_avg = (raw_prefix[n] - raw_prefix[block_start]) / c
+                if raw_avg > max_price:
+                    continue
+            best = dp[k][c]
+            best_state = c
+        cost_by_k[k] = best
+        end_state_by_k[k] = best_state
+
+    return cost_by_k, history, end_state_by_k
+
+
+def _reconstruct_run_selection(run: list[dict], history: list, k: int, end_state_by_k: list[int]) -> set:
+    """Recover which of a run's date_times were selected to achieve _min_cost_for_run's
+    cost_by_k[k], by replaying the DP's backpointers from the best final state at k."""
+    selected: set = set()
+    cur_k, cur_s = k, end_state_by_k[k]
+    for t in range(len(run) - 1, -1, -1):
+        kind, prev_k, prev_s = history[t][cur_k][cur_s]
+        if kind in ("start", "mand", "extend"):
+            selected.add(run[t]["date_time"])
+        cur_k, cur_s = prev_k, prev_s
+    return selected
+
+
+def _solve_with_per_run_costs(
+    eligible: list[dict],
+    valid_runs: list[list[dict]],
+    eligible_from_valid: list[dict],
+    per_run: list[tuple[list[float], list, list[int]]],
+    required_slots: int,
+    max_price: float | None,
+) -> list[dict]:
+    """Shared final stage for both DP-based algorithms (_find_optimal_slots_optimal,
+    _find_optimal_slots_hybrid): given each valid run's _min_cost_for_run cost curve,
+    find the overall cheapest required_slots-sized selection.
+
+    If max_price is set and no run has a valid block of any size, there is nothing to
+    build a schedule from at all -- same as OPTIMIZATION_ALGORITHM_GREEDY's own early
+    "no priced windows survived the cap" guard, which this mirrors. Without it, the
+    relaxed leftover top-up below (which -- also matching greedy -- doesn't itself
+    filter candidate slots by max_price, since a single top-up slot isn't a priced
+    block average) would otherwise be the only candidate and could return a schedule
+    entirely made of slots over the cap.
+
+    A small knapsack (combined[j] = min cost to select exactly j slots using whole
+    valid blocks from the runs considered so far) finds, for every partial total j up
+    to required_slots, the cheapest way to reach it using only fully min_block_hours-
+    respecting blocks. j == required_slots itself is one candidate answer; every
+    smaller j is also tried, topped up to required_slots with the cheapest leftover
+    individual slots (the same "last block may end up shorter than min_block_hours"
+    relaxation every algorithm falls back to) -- and the overall cheapest candidate
+    wins, whether or not the strict j == required_slots combination succeeded.
+
+    Trying every partial total (not just falling back to it when the strict one fails)
+    matters because a combination that bends the block-size rule for one cheap leftover
+    slot can beat a stricter one that doesn't -- matching OPTIMIZATION_ALGORITHM_GREEDY's
+    own willingness to use that fallback opportunistically rather than only as an
+    unschedulable-otherwise last resort (confirmed during issue #55 verification: an
+    "optimal" that always preferred the strict combination could come out pricier than
+    greedy on exactly this kind of case, which an "optimal" algorithm must never do).
+    """
+    if max_price is not None and all(all(c == math.inf for c in cost_by_k[1:]) for cost_by_k, _, _ in per_run):
+        return []
+
+    combined = [math.inf] * (required_slots + 1)
+    combined[0] = 0.0
+    choices: list[list[int | None]] = []
+    for cost_by_k, _, _ in per_run:
+        new_combined = list(combined)
+        choice_row: list[int | None] = [None] * (required_slots + 1)
+        max_k = len(cost_by_k) - 1
+        for j in range(required_slots + 1):
+            if combined[j] == math.inf:
+                continue
+            upper = min(max_k, required_slots - j)
+            for k in range(1, upper + 1):
+                cost_k = cost_by_k[k]
+                if cost_k == math.inf:
+                    continue
+                cand = combined[j] + cost_k
+                if cand < new_combined[j + k]:
+                    new_combined[j + k] = cand
+                    choice_row[j + k] = k
+        combined = new_combined
+        choices.append(choice_row)
+
+    def _backtrack(target_j: int) -> set:
+        selected_dts: set = set()
+        j = target_j
+        for run_idx in range(len(per_run) - 1, -1, -1):
+            k = choices[run_idx][j]
+            if not k:
+                continue
+            _, history, end_state_by_k = per_run[run_idx]
+            selected_dts |= _reconstruct_run_selection(valid_runs[run_idx], history, k, end_state_by_k)
+            j -= k
+        return selected_dts
+
+    # candidates is never empty: the caller has already checked
+    # len(eligible_from_valid) >= required_slots, so j=0 (combined[0]=0.0, no whole
+    # blocks) always has at least `required_slots` leftover slots to top up with.
+    candidates: list[tuple[set, float]] = []
+    for j in range(required_slots + 1):
+        if combined[j] == math.inf:
+            continue
+        whole_block_dts = _backtrack(j) if j > 0 else set()
+        remaining = required_slots - j
+        if remaining == 0:
+            candidates.append((whole_block_dts, combined[j]))
+            continue
+        leftover = sorted(
+            (s for s in eligible_from_valid if s["date_time"] not in whole_block_dts),
+            key=lambda s: s["effective_price"],
+        )
+        topped_up = set(whole_block_dts)
+        added_cost = 0.0
+        for s in leftover[:remaining]:
+            topped_up.add(s["date_time"])
+            added_cost += s["effective_price"]
+        candidates.append((topped_up, combined[j] + added_cost))
+
+    selected_dts, _ = min(candidates, key=lambda c: c[1])
+    result = [s for s in eligible if s["date_time"] in selected_dts]
+    result.sort(key=lambda s: s["date_time"])
+    return result
+
+
+def _min_max_slots_per_block(
+    required_slots: int, min_block_hours: float, max_block_hours: float | None
+) -> tuple[int, int | None]:
+    """Shared min/max-slots-per-block derivation for the DP-based algorithms (see
+    _find_optimal_slots_greedy's matching logic, which this mirrors): a minimum
+    block longer than the whole requirement relaxes to a single contiguous block,
+    and a max_block_hours cap shorter than the minimum floors up to it instead of
+    leaving the DP with no valid block size at all (issue #40)."""
+    min_slots_per_block = min(max(1, math.ceil(min_block_hours * 2)), required_slots)
+    max_slots_per_block = math.ceil(max_block_hours * 2) if max_block_hours and max_block_hours > 0 else None
+    if max_slots_per_block is not None:
+        max_slots_per_block = max(max_slots_per_block, min_slots_per_block)
+    return min_slots_per_block, max_slots_per_block
+
+
+def _find_optimal_slots_optimal(
+    candidate_slots: list[dict],
+    required_slots: int,
+    ready_by_dt: datetime,
+    min_block_hours: float,
+    max_price: float | None = None,
+    max_block_hours: float | None = None,
+) -> list[dict]:
+    """Exact version of find_optimal_slots (OPTIMIZATION_ALGORITHM_OPTIMAL): every
+    contiguous run of eligible slots is solved exactly via _min_cost_for_run's DP
+    (minimum cost to pick exactly k of that run's slots as valid blocks, for every
+    reachable k), then _solve_with_per_run_costs combines the per-run cost curves
+    across runs to hit required_slots at minimum total cost. This finds the true
+    optimum instead of the greedy "pick the single cheapest window, then fill the
+    remainder from whatever's left" approach, which can lose to a combination -- often
+    one larger contiguous window -- with a cheaper combined total (issue #55).
+
+    Costs O(run_length * required_slots) per run, which is fast at realistic scale
+    (a week of 30-min slots resolves in well under 100ms) but can be slower than the
+    other two algorithms on a very long price horizon combined with a large or
+    unbounded max_block_hours -- see OPTIMIZATION_ALGORITHM_HYBRID for a faster,
+    heuristic middle ground.
+    """
+    if not candidate_slots or required_slots <= 0:
+        return []
+
+    min_slots_per_block, max_slots_per_block = _min_max_slots_per_block(
+        required_slots, min_block_hours, max_block_hours
+    )
+
+    eligible = [s for s in candidate_slots if s["date_time"] + timedelta(minutes=30) <= ready_by_dt]
+    eligible.sort(key=lambda s: s["date_time"])
+
+    all_runs = build_contiguous_runs(eligible)
+    valid_runs = [r for r in all_runs if len(r) >= min_slots_per_block]
+    eligible_from_valid = [s for run in valid_runs for s in run]
+
+    if len(eligible_from_valid) < required_slots:
+        return []
+
+    per_run = [
+        _min_cost_for_run(run, required_slots, min_slots_per_block, max_slots_per_block, max_price)
+        for run in valid_runs
+    ]
+
+    return _solve_with_per_run_costs(eligible, valid_runs, eligible_from_valid, per_run, required_slots, max_price)
+
+
+def _find_optimal_slots_hybrid(
+    candidate_slots: list[dict],
+    required_slots: int,
+    ready_by_dt: datetime,
+    min_block_hours: float,
+    max_price: float | None = None,
+    max_block_hours: float | None = None,
+) -> list[dict]:
+    """Narrowed-search version of find_optimal_slots (OPTIMIZATION_ALGORITHM_HYBRID):
+    a fast pre-pass restricts each run's DP to a handful of representative block sizes
+    -- min_slots_per_block, the run's max usable size, and a few sizes in between --
+    always including whichever size exactly covers what's still needed (the "one
+    window spans the whole requirement" case that fixes issue #55's reported example),
+    then _solve_with_per_run_costs searches exactly over just those sizes.
+
+    This is a heuristic, not an exact search like OPTIMIZATION_ALGORITHM_OPTIMAL: sizes
+    other than the representative ones are never considered, so a combination that
+    only works at an untried size could in principle be missed. In exchange it stays
+    close to the greedy algorithm's speed (each representative size costs the same
+    single DP pass regardless of how many other sizes exist), rather than scaling with
+    every achievable k the way the fully exact algorithm does.
+    """
+    if not candidate_slots or required_slots <= 0:
+        return []
+
+    min_slots_per_block, max_slots_per_block = _min_max_slots_per_block(
+        required_slots, min_block_hours, max_block_hours
+    )
+
+    eligible = [s for s in candidate_slots if s["date_time"] + timedelta(minutes=30) <= ready_by_dt]
+    eligible.sort(key=lambda s: s["date_time"])
+
+    all_runs = build_contiguous_runs(eligible)
+    valid_runs = [r for r in all_runs if len(r) >= min_slots_per_block]
+    eligible_from_valid = [s for run in valid_runs for s in run]
+
+    if len(eligible_from_valid) < required_slots:
+        return []
+
+    per_run = []
+    for run in valid_runs:
+        run_max = min(len(run), required_slots)
+        if max_slots_per_block is not None:
+            run_max = min(run_max, max_slots_per_block)
+        # Representative sizes: the two ends of the run's usable range, the size that
+        # would exactly cover the remaining requirement in one block, and a few
+        # intermediate fractions of it -- narrowing the search from "every achievable
+        # k" down to a small, fixed-size set of candidate block lengths per run.
+        candidate_sizes = {min_slots_per_block, run_max}
+        for divisor in (2, 3, 4):
+            size = required_slots // divisor
+            if min_slots_per_block <= size <= run_max:
+                candidate_sizes.add(size)
+        # _min_cost_for_run computes the whole 0..k_cap cost curve in one pass, so
+        # rather than call it once per representative size (which would only look at
+        # single-block windows), call it once with k_cap capped at the largest
+        # representative size -- this still explores every k up to that cap using
+        # whatever mix of blocks is cheapest, it just never explores k's above the
+        # largest representative size, keeping the DP's cost bounded independent of
+        # required_slots when the run is much longer than any representative size.
+        k_cap = max(candidate_sizes) if candidate_sizes else min_slots_per_block
+        per_run.append(_min_cost_for_run(run, k_cap, min_slots_per_block, max_slots_per_block, max_price))
+
+    return _solve_with_per_run_costs(eligible, valid_runs, eligible_from_valid, per_run, required_slots, max_price)
+
+
+def find_optimal_slots(
+    candidate_slots: list[dict],
+    required_slots: int,
+    ready_by_dt: datetime,
+    min_block_hours: float,
+    max_price: float | None = None,
+    max_block_hours: float | None = None,
+    algorithm: str = OPTIMIZATION_ALGORITHM_GREEDY,
+) -> list[dict]:
+    """Select the cheapest combination of slots totalling required_slots, where every
+    contiguous block is >= min_block_hours and (if max_price given) each block's average
+    raw price <= max_price. Returns a flat list of selected slot dicts, or [] if none.
+
+    algorithm picks which of three implementations does the selection (see
+    OPTIMIZATION_ALGORITHM_* in const.py for the tradeoffs):
+    - "greedy" (default): _find_optimal_slots_greedy, the original fast-but-occasionally-
+      suboptimal algorithm (issue #55) -- unchanged, kept as the default.
+    - "optimal": _find_optimal_slots_optimal, an exact search that's always at least as
+      cheap as greedy, at the cost of more compute on very long price horizons.
+    - "hybrid": _find_optimal_slots_hybrid, a narrowed exact search over a handful of
+      representative block sizes per run -- close to greedy's speed, much less likely
+      to miss a cheaper single window, but not guaranteed globally optimal.
+
+    max_block_hours (if given and > 0) caps how long any single contiguous block may
+    be — a cheap run longer than this is never offered as one big window, so when the
+    cheapest slots are spread across separate price dips they get combined into
+    several smaller blocks capped at this length rather than one long one. Note this
+    is a cap on window size during selection, not an enforced rest period: if the
+    single cheapest option in the market genuinely is one long uninterrupted dip,
+    capping the window size still results in back-to-back blocks with no gap between
+    them, since there's no cost-based reason to leave a cheaper slot unpicked.
+    """
+    impl = _ALGORITHM_IMPLEMENTATIONS.get(algorithm, _find_optimal_slots_greedy)
+    return impl(candidate_slots, required_slots, ready_by_dt, min_block_hours, max_price, max_block_hours)
+
+
+_ALGORITHM_IMPLEMENTATIONS = {
+    OPTIMIZATION_ALGORITHM_GREEDY: _find_optimal_slots_greedy,
+    OPTIMIZATION_ALGORITHM_OPTIMAL: _find_optimal_slots_optimal,
+    OPTIMIZATION_ALGORITHM_HYBRID: _find_optimal_slots_hybrid,
+}
 
 
 def slots_to_sessions(selected_slots: list[dict]) -> list[dict]:
