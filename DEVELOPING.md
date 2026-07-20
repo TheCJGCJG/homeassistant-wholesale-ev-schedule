@@ -18,7 +18,7 @@ custom_components/wholesale_ev_schedule/
   binary_sensor.py  charging_desired output
   number.py         live inputs: hours required, boost duration, scheduling tolerances
   datetime.py       ready_by — live input
-  select.py         charge_override — manual force-on/force-off
+  select.py         charge_override, optimization_algorithm — manual overrides
   button.py         boost_cancel, stop, reset — actions
   brand/            icon/logo shown in the HA UI (local brand images, HA 2026.3+)
 ```
@@ -39,6 +39,19 @@ custom_components/wholesale_ev_schedule/
   charger (a switch, an API call, your own automation) and use the override
   select to force it on/off regardless of the computed schedule. This keeps
   the integration portable across charger brands.
+- **`find_optimal_slots` supports three interchangeable selection algorithms**
+  (`OPTIMIZATION_ALGORITHM_*` in `const.py`, chosen at runtime via the
+  `optimization_algorithm` select entity, `coordinator.optimization_algorithm`):
+  `_find_optimal_slots_greedy` (the original implementation, unchanged,
+  default), `_find_optimal_slots_optimal` (an exact DP-based search — see
+  `_min_cost_for_run`'s docstring for the state-machine details, and its
+  docstring's note on why `max_price` is checked only where a block's size is
+  actually decided, not incrementally while it grows), and
+  `_find_optimal_slots_hybrid` (the same DP restricted to a handful of
+  representative block sizes per run, for speed). All three share
+  `_min_max_slots_per_block` and `_solve_with_per_run_costs`; added for #55
+  (greedy can lose to a combination — often one larger window — whose
+  combined total is cheaper than picking the single cheapest window first).
 - **There's no live `max_block_hours` entity** — it was removed as an
   unnecessary second knob (it only ever capped window *selection* size
   without guaranteeing an actual rest period; genuine multi-block scheduling
@@ -121,9 +134,9 @@ All tests run inside Docker (`public.ecr.aws/docker/library/python:trixie`):
 ./run-tests.sh --shell      # interactive shell in the container
 ```
 
-157 tests, 98% branch coverage (100% on `config_flow.py`, `providers.py`,
-`button.py`, `select.py`, `number.py`, `entity.py`):
-- `tests/test_scheduler.py` — unit tests for the pure scheduling algorithm, including max_block_hours splitting (the pure capability), next_ready_by (including a DST spring-forward transition), and the price-summary diagnostics
+What each test file covers:
+- `tests/test_scheduler.py` — unit tests for the pure scheduling algorithm, including max_block_hours splitting (the pure capability), next_ready_by (including a DST spring-forward transition), the price-summary diagnostics, and the "optimal"/"hybrid" algorithms against every greedy scenario plus issue #55's reported case
+- `tests/test_optimization_algorithm.py` — the optimization_algorithm select entity: default value, persistence via the select entity, survival across restarts, an invalid stored value degrading to greedy, reset restoring the default
 - `tests/test_integration_smoke.py` — full config/options flow, entity registration, idle vs error state on a fresh setup given the new defaults
 - `tests/test_providers.py` — custom rates/forecast provider branches, "no forecast" branch, blank custom attribute/key fields rejected, re-enabling forecast after "none"
 - `tests/test_multi_instance.py` — two instances with distinct names don't collide; duplicate-name/slug is rejected; blank name is rejected
