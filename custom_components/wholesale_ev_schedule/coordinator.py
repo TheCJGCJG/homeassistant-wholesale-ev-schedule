@@ -49,6 +49,7 @@ from .const import (
     DEFAULT_MAX_PRICE,
     DEFAULT_MIN_BLOCK_HOURS,
     DEFAULT_NAME,
+    DEFAULT_OPTIMIZATION_ALGORITHM,
     DEFAULT_RATE_START_KEY,
     DEFAULT_RATE_UNIT_MULTIPLIER,
     DEFAULT_RATE_VALUE_KEY,
@@ -58,6 +59,9 @@ from .const import (
     DEFAULT_REQUIRED_HOURS,
     DEFAULT_UPDATE_INTERVAL_MINUTES,
     DOMAIN,
+    OPTIMIZATION_ALGORITHM_GREEDY,
+    OPTIMIZATION_ALGORITHM_HYBRID,
+    OPTIMIZATION_ALGORITHM_OPTIMAL,
     STATE_BOOSTING,
     STATE_ERROR,
     STATE_IDLE,
@@ -81,6 +85,11 @@ from .scheduler import (
 
 _LOGGER = logging.getLogger(__name__)
 _VALID_CHARGE_OVERRIDES = {CHARGE_OVERRIDE_AUTO, CHARGE_OVERRIDE_FORCE_ON, CHARGE_OVERRIDE_FORCE_OFF}
+_VALID_OPTIMIZATION_ALGORITHMS = {
+    OPTIMIZATION_ALGORITHM_GREEDY,
+    OPTIMIZATION_ALGORITHM_OPTIMAL,
+    OPTIMIZATION_ALGORITHM_HYBRID,
+}
 
 
 class WholesaleEvScheduleCoordinator(DataUpdateCoordinator[dict]):
@@ -144,6 +153,7 @@ class WholesaleEvScheduleCoordinator(DataUpdateCoordinator[dict]):
         self.min_block_hours: float = self._default_min_block_hours
         self.max_price: float = self._default_max_price
         self.charge_override: str = DEFAULT_CHARGE_OVERRIDE
+        self.optimization_algorithm: str = DEFAULT_OPTIMIZATION_ALGORITHM
         self.assumed_charge_kwh: float = DEFAULT_ASSUMED_CHARGE_KWH
 
         self._stored_sessions: list[dict] = []
@@ -194,6 +204,7 @@ class WholesaleEvScheduleCoordinator(DataUpdateCoordinator[dict]):
         )
         self.max_price = self._parse_stored_float(data.get("max_price"), self._default_max_price, "max_price")
         self.charge_override = self._parse_stored_charge_override(data.get("charge_override"))
+        self.optimization_algorithm = self._parse_stored_optimization_algorithm(data.get("optimization_algorithm"))
         self.assumed_charge_kwh = self._parse_stored_float(
             data.get("assumed_charge_kwh"), DEFAULT_ASSUMED_CHARGE_KWH, "assumed_charge_kwh"
         )
@@ -260,6 +271,23 @@ class WholesaleEvScheduleCoordinator(DataUpdateCoordinator[dict]):
             _LOGGER.warning("Stored charge_override %r is invalid; using default %s", value, DEFAULT_CHARGE_OVERRIDE)
         return DEFAULT_CHARGE_OVERRIDE
 
+    def _parse_stored_optimization_algorithm(self, value: str | None) -> str:
+        """Validate a stored optimization_algorithm against the enum, degrading to
+        DEFAULT_OPTIMIZATION_ALGORITHM if it's anything else -- same reasoning as
+        _parse_stored_charge_override (#36): an unrecognized value would otherwise
+        silently fall through find_optimal_slots' own default (harmless, but
+        reported back as the select entity's current_option outside its declared
+        options)."""
+        if value in _VALID_OPTIMIZATION_ALGORITHMS:
+            return value
+        if value is not None:
+            _LOGGER.warning(
+                "Stored optimization_algorithm %r is invalid; using default %s",
+                value,
+                DEFAULT_OPTIMIZATION_ALGORITHM,
+            )
+        return DEFAULT_OPTIMIZATION_ALGORITHM
+
     async def _async_save_stored_state(self) -> None:
         await self._store.async_save(
             {
@@ -269,6 +297,7 @@ class WholesaleEvScheduleCoordinator(DataUpdateCoordinator[dict]):
                 "min_block_hours": self.min_block_hours,
                 "max_price": self.max_price,
                 "charge_override": self.charge_override,
+                "optimization_algorithm": self.optimization_algorithm,
                 "assumed_charge_kwh": self.assumed_charge_kwh,
                 "sessions": self._stored_sessions,
                 "boost_end": self._boost_end.isoformat() if self._boost_end else None,
@@ -325,6 +354,11 @@ class WholesaleEvScheduleCoordinator(DataUpdateCoordinator[dict]):
         await self._async_save_stored_state()
         await self.async_refresh()
 
+    async def async_set_optimization_algorithm(self, value: str) -> None:
+        self.optimization_algorithm = value
+        await self._async_save_stored_state()
+        await self.async_refresh()
+
     async def async_start_boost(self, duration_hours: float) -> None:
         self._boost_end = dt_util.now() + timedelta(hours=duration_hours)
         await self._async_save_stored_state()
@@ -351,11 +385,12 @@ class WholesaleEvScheduleCoordinator(DataUpdateCoordinator[dict]):
         """Put everything back to the configured setup-time defaults (see
         class docstring): ready_by (next self._default_ready_by_hour, at
         least self._default_ready_by_day_offset days out), required_hours,
-        gamble tolerance, min block hours, max price, assumed charge kWh, and
-        the charge override, on top of clearing the schedule and any boost
-        like async_stop does. Intended to be triggered by an automation on
-        charger-unplugged, so the next plug-in starts from a completely clean
-        slate rather than carrying over yesterday's tweaks."""
+        gamble tolerance, min block hours, max price, assumed charge kWh, the
+        charge override, and the optimization algorithm, on top of clearing
+        the schedule and any boost like async_stop does. Intended to be
+        triggered by an automation on charger-unplugged, so the next plug-in
+        starts from a completely clean slate rather than carrying over
+        yesterday's tweaks."""
         self.ready_by = next_ready_by(dt_util.now(), self._default_ready_by_hour, self._default_ready_by_day_offset)
         self.required_hours = self._default_required_hours
         self.gamble_tolerance = self._default_gamble_tolerance
@@ -363,6 +398,7 @@ class WholesaleEvScheduleCoordinator(DataUpdateCoordinator[dict]):
         self.max_price = self._default_max_price
         self.assumed_charge_kwh = DEFAULT_ASSUMED_CHARGE_KWH
         self.charge_override = DEFAULT_CHARGE_OVERRIDE
+        self.optimization_algorithm = DEFAULT_OPTIMIZATION_ALGORITHM
         self._stored_sessions = []
         self._boost_end = None
         await self._async_save_stored_state()
@@ -501,6 +537,7 @@ class WholesaleEvScheduleCoordinator(DataUpdateCoordinator[dict]):
                 self.ready_by,
                 self.min_block_hours,
                 max_price=self.max_price,
+                algorithm=self.optimization_algorithm,
             )
             future_sessions = slots_to_sessions(future_slots)
 

@@ -152,12 +152,13 @@ configurable at setup time, most people won't need to touch them):
   but the same deadline still applies tomorrow).
 - **Reset** (button) — puts everything back to defaults: ready-by, hours
   required, gamble tolerance, minimum block length, max price, assumed
-  charge kWh, and the charge override, on top of clearing the schedule and
-  any boost like Stop does. Handy to wire to an automation that fires when
-  your charger becomes unplugged, so the next time you plug in you're
-  starting completely fresh. Which values Reset restores (other than assumed
-  charge kWh and the charge override, which are fixed) is controlled by the
-  optional defaults set at setup time — see [Setup](#setup) above.
+  charge kWh, the charge override, and the optimization algorithm, on top of
+  clearing the schedule and any boost like Stop does. Handy to wire to an
+  automation that fires when your charger becomes unplugged, so the next
+  time you plug in you're starting completely fresh. Which values Reset
+  restores (other than assumed charge kWh, the charge override, and the
+  optimization algorithm, which are fixed) is controlled by the optional
+  defaults set at setup time — see [Setup](#setup) above.
 
 **Manual override:**
 - **Charge override** (`select`: Auto / Force On / Force Off) — leave on
@@ -166,6 +167,27 @@ configurable at setup time, most people won't need to touch them):
   says — useful for "just charge now, I don't care about price" or "don't
   charge no matter what, even if it's a cheap slot" (e.g. the car's in for
   service).
+
+**Optimization algorithm** (`select`: Greedy / Optimal / Hybrid, default
+Greedy) — which strategy picks the cheapest charging slots:
+- **Greedy** (default) — picks the single cheapest window first and fills
+  any remainder from what's left. Fast, but can occasionally miss a
+  cheaper combination — e.g. two separate windows that individually look
+  cheap can add up to more than one larger window that spans both, which
+  greedy never compares against.
+- **Optimal** — an exact search that always finds the true cheapest
+  combination, never worse than Greedy. More compute on a long price
+  horizon combined with a large or unlimited minimum block length, though
+  still well under a second at realistic scale.
+- **Hybrid** — a narrowed exact search over a handful of representative
+  block sizes per price run. Close to Greedy's speed, much less likely to
+  miss a cheaper single window, but — being a narrowed search rather than
+  an exhaustive one — not guaranteed to find the true optimum the way
+  Optimal is.
+
+If you've noticed a scheduled session that looks like it's leaving cheaper
+prices on the table, switching to Optimal (or Hybrid, if Optimal feels too
+slow to compute) is the fix.
 
 ## What you'll see
 

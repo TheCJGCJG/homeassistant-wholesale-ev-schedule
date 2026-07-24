@@ -428,6 +428,285 @@ def test_find_optimal_slots_stays_fast_with_a_large_window_and_run():
     assert elapsed < 0.5
 
 
+# ---------------------------------------------------------------------------
+# find_optimal_slots -- "optimal" and "hybrid" algorithms (issue #55)
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize("algorithm", ["optimal", "hybrid"])
+def test_find_optimal_slots_optimal_and_hybrid_fix_issue_55_greedy_suboptimality(algorithm):
+    # Regression for issue #55. A 6-hour requirement (12 slots) against this
+    # exact price run: the greedy algorithm picks the single cheapest 6-slot
+    # window first (12:00-15:00), then is forced to fill the remaining 6
+    # slots from the front of the run (09:00-12:00) -- landing on
+    # 09:00-15:00 at raw avg 9.07p/kWh (sum 108.8). But the single best
+    # *contiguous* 12-slot window in the same run, 10:00-16:00, averages
+    # 7.91p/kWh (sum 94.9) -- strictly cheaper, and satisfies every
+    # constraint just as well. Greedy never compares "one big window" against
+    # "two small windows" by total cost, only individual window averages
+    # against each other, so it can miss this. Both "optimal" (an exact
+    # search) and "hybrid" (a narrowed search that always includes the
+    # exactly-covers-the-requirement window size) must find the cheaper one.
+    prices = [15.2, 13.9, 13.1, 12.6, 10.4, 7.8, 7.6, 7.5, 6.6, 6.2, 4.6, 3.3, 7.7, 7.5, 18.6]
+    run = [
+        {"date_time": NOW + timedelta(minutes=30 * i), "raw_price": p, "source": "current_actual"}
+        for i, p in enumerate(prices)
+    ]
+    slots = assign_credibilities(run, NOW, gamble_tolerance=100.0)
+
+    greedy_result = find_optimal_slots(
+        slots, required_slots=12, ready_by_dt=NOW + timedelta(hours=10), min_block_hours=3.0, algorithm="greedy"
+    )
+    greedy_avg = sum(s["raw_price"] for s in greedy_result) / len(greedy_result)
+    assert greedy_avg == pytest.approx(9.0666, abs=1e-3)  # sanity: greedy really does pick the worse combination
+
+    result = find_optimal_slots(
+        slots, required_slots=12, ready_by_dt=NOW + timedelta(hours=10), min_block_hours=3.0, algorithm=algorithm
+    )
+    dts = sorted(s["date_time"] for s in result)
+    avg = sum(s["raw_price"] for s in result) / len(result)
+
+    assert dts == [NOW + timedelta(minutes=30 * i) for i in range(2, 14)]  # 10:00-16:00
+    assert avg == pytest.approx(7.9083, abs=1e-3)
+    assert avg < greedy_avg
+
+
+@pytest.mark.parametrize("algorithm", ["optimal", "hybrid"])
+def test_find_optimal_slots_optimal_and_hybrid_respect_max_price(algorithm):
+    # Same case as test_find_optimal_slots_max_price_excludes_expensive_windows,
+    # re-run against the other two algorithms: no valid block exists under the
+    # cap, so the result must be [] regardless of which algorithm is used, not
+    # a schedule that silently violates max_price via the relaxed fallback.
+    slots = assign_credibilities(make_slots(NOW, 2, price=30.0), NOW, 100.0)
+    result = find_optimal_slots(
+        slots,
+        required_slots=2,
+        ready_by_dt=NOW + timedelta(hours=5),
+        min_block_hours=1.0,
+        max_price=20.0,
+        algorithm=algorithm,
+    )
+    assert result == []
+
+
+@pytest.mark.parametrize("algorithm", ["optimal", "hybrid"])
+def test_find_optimal_slots_optimal_and_hybrid_reject_an_extension_that_would_break_max_price(algorithm):
+    # A 1-slot block (min_block_hours=0.5) at the first two tied-cheap slots is
+    # valid on its own (avg 10p), but extending it to include the third,
+    # expensive slot would push the block's average to 20p -- over
+    # max_price=15. The DP must reject that extension and settle for the two
+    # cheap slots as separate/whatever-sized valid blocks, never a block whose
+    # average silently exceeds max_price.
+    run = [
+        {"date_time": NOW, "raw_price": 10.0, "source": "current_actual"},
+        {"date_time": NOW + timedelta(minutes=30), "raw_price": 10.0, "source": "current_actual"},
+        {"date_time": NOW + timedelta(hours=1), "raw_price": 30.0, "source": "current_actual"},
+    ]
+    slots = assign_credibilities(run, NOW, gamble_tolerance=100.0)
+
+    result = find_optimal_slots(
+        slots,
+        required_slots=2,
+        ready_by_dt=NOW + timedelta(hours=5),
+        min_block_hours=0.5,
+        max_price=15.0,
+        algorithm=algorithm,
+    )
+
+    assert {s["raw_price"] for s in result} == {10.0}
+    assert len(result) == 2
+
+
+@pytest.mark.parametrize("algorithm", ["optimal", "hybrid"])
+def test_find_optimal_slots_optimal_and_hybrid_dont_reject_a_block_whose_final_average_is_fine(algorithm):
+    # Regression for a bug found reviewing the initial issue #55 fix: max_price was
+    # being checked against every intermediate prefix as a block grew, not just its
+    # eventual final size -- so a block starting [30, 1] (avg 15.5, over a cap of 12)
+    # was rejected outright at its minimum size, permanently closing off the longer
+    # block [30, 1, 1, 1, 1] (avg 6.8), which is valid and the only way to use all 5
+    # slots in this single run. required_slots=5 forces exactly that whole-run block.
+    run = [
+        {"date_time": NOW + timedelta(minutes=30 * i), "raw_price": p, "source": "current_actual"}
+        for i, p in enumerate([30.0, 1.0, 1.0, 1.0, 1.0])
+    ]
+    slots = assign_credibilities(run, NOW, gamble_tolerance=100.0)
+
+    result = find_optimal_slots(
+        slots,
+        required_slots=5,
+        ready_by_dt=NOW + timedelta(hours=10),
+        min_block_hours=1.0,
+        max_price=12.0,
+        algorithm=algorithm,
+    )
+
+    assert len(result) == 5
+    assert sum(s["raw_price"] for s in result) == pytest.approx(34.0)
+
+
+@pytest.mark.parametrize("algorithm", ["optimal", "hybrid"])
+def test_find_optimal_slots_optimal_and_hybrid_prefer_a_cheaper_relaxed_combination_over_a_stricter_one(algorithm):
+    # Regression for a bug found reviewing the initial issue #55 fix: these
+    # algorithms only fell back to a relaxed (sub-minimum-block leftover) combination
+    # when no fully min_block_hours-respecting combination existed at all, even when
+    # a relaxed combination would have been strictly cheaper -- which could make
+    # "optimal" report a WORSE schedule than "greedy", since greedy uses its own
+    # relaxed fallback opportunistically whenever it's cheaper, not just as a last
+    # resort. Two disjoint runs: run_b = [30, 1, 1, 1, 1] (min_block_hours=1.0 means
+    # a valid block must use >= 2 of its slots), run_a = [8, 8]. required_slots=5.
+    # The only whole-block combination is 3 of run_b + both of run_a (cost 19.0), but
+    # relaxing to 4 of run_b (the four 1.0 slots, one valid 4-slot block) plus a
+    # single sub-minimum leftover slot from run_a is cheaper (cost 12.0) -- and must
+    # win, matching what greedy actually returns for this exact case.
+    run_b = [
+        {"date_time": NOW + timedelta(minutes=30 * i), "raw_price": p, "source": "current_actual"}
+        for i, p in enumerate([30.0, 1.0, 1.0, 1.0, 1.0])
+    ]
+    run_a_start = NOW + timedelta(hours=5)
+    run_a = [
+        {"date_time": run_a_start + timedelta(minutes=30 * i), "raw_price": 8.0, "source": "current_actual"}
+        for i in range(2)
+    ]
+    slots = assign_credibilities(run_b + run_a, NOW, gamble_tolerance=100.0)
+
+    greedy_result = find_optimal_slots(
+        slots,
+        required_slots=5,
+        ready_by_dt=NOW + timedelta(hours=10),
+        min_block_hours=1.0,
+        max_price=12.0,
+        algorithm="greedy",
+    )
+    greedy_cost = sum(s["raw_price"] for s in greedy_result)
+    assert greedy_cost == pytest.approx(12.0)  # sanity: greedy really does find the cheaper relaxed combination
+
+    result = find_optimal_slots(
+        slots,
+        required_slots=5,
+        ready_by_dt=NOW + timedelta(hours=10),
+        min_block_hours=1.0,
+        max_price=12.0,
+        algorithm=algorithm,
+    )
+    cost = sum(s["raw_price"] for s in result)
+
+    assert len(result) == 5
+    assert cost == pytest.approx(12.0)
+    assert cost <= greedy_cost
+
+
+@pytest.mark.parametrize("algorithm", ["optimal", "hybrid"])
+def test_find_optimal_slots_optimal_and_hybrid_produce_a_valid_schedule_for_disjoint_runs(algorithm):
+    # Same case as test_find_optimal_slots_disjoint_runs_each_too_short_for_a_neat_remainder
+    # (issue #23), re-run against the other two algorithms: still expected to
+    # take the cheaper run in full plus one leftover slot from the other.
+    run_a = make_slots(NOW, 2, price=1.0)
+    run_b_start = NOW + timedelta(hours=5)
+    run_b = make_slots(run_b_start, 2, price=2.0)
+    slots = assign_credibilities(run_a + run_b, NOW, gamble_tolerance=100.0)
+
+    result = find_optimal_slots(
+        slots,
+        required_slots=3,
+        ready_by_dt=NOW + timedelta(hours=10),
+        min_block_hours=1.0,
+        algorithm=algorithm,
+    )
+
+    result_dts = {s["date_time"] for s in result}
+    assert len(result_dts) == 3
+    assert result_dts == {run_a[0]["date_time"], run_a[1]["date_time"], run_b[0]["date_time"]}
+
+
+@pytest.mark.parametrize("algorithm", ["optimal", "hybrid"])
+def test_find_optimal_slots_optimal_and_hybrid_respect_max_block_hours_gap(algorithm):
+    # Same case as test_find_optimal_slots_max_block_hours_produces_a_real_gap_around_a_price_spike,
+    # re-run against the other two algorithms.
+    prices = [1.0, 1.0, 5.0, 5.0, 1.0, 1.0]
+    run = [
+        {"date_time": NOW + timedelta(minutes=30 * i), "raw_price": p, "source": "current_actual"}
+        for i, p in enumerate(prices)
+    ]
+    slots = assign_credibilities(run, NOW, gamble_tolerance=100.0)
+
+    result = find_optimal_slots(
+        slots,
+        required_slots=4,
+        ready_by_dt=NOW + timedelta(hours=5),
+        min_block_hours=1.0,
+        max_block_hours=1.0,
+        algorithm=algorithm,
+    )
+
+    sessions = build_contiguous_runs(sorted(result, key=lambda s: s["date_time"]))
+    assert len(sessions) == 2
+    assert all(len(session) == 2 for session in sessions)
+    picked_prices = {s["raw_price"] for s in result}
+    assert picked_prices == {1.0}
+
+
+@pytest.mark.parametrize("algorithm", ["optimal", "hybrid"])
+def test_find_optimal_slots_optimal_and_hybrid_return_empty_for_zero_required(algorithm):
+    slots = assign_credibilities(make_slots(NOW, 2), NOW, 100.0)
+    assert find_optimal_slots(slots, 0, NOW + timedelta(hours=5), 1.0, algorithm=algorithm) == []
+
+
+@pytest.mark.parametrize("algorithm", ["optimal", "hybrid"])
+def test_find_optimal_slots_optimal_and_hybrid_respect_ready_by(algorithm):
+    # Same case as test_find_optimal_slots_respects_ready_by, re-run against
+    # the other two algorithms: not enough eligible slots remain once
+    # ready_by excludes everything, so the result must be [].
+    slots = assign_credibilities(make_slots(NOW + timedelta(hours=20), 2, price=1.0), NOW, 100.0)
+    result = find_optimal_slots(
+        slots, required_slots=2, ready_by_dt=NOW + timedelta(hours=5), min_block_hours=1.0, algorithm=algorithm
+    )
+    assert result == []
+
+
+def test_find_optimal_slots_optimal_stays_reasonably_fast_with_a_large_window_and_run():
+    # Same scale as test_find_optimal_slots_stays_fast_with_a_large_window_and_run,
+    # run against the exact "optimal" DP instead of greedy. This algorithm is
+    # O(run_length * required_slots), inherently slower than greedy's O(1)-per-
+    # window approach, so it gets a looser ceiling -- generous enough to catch
+    # a real complexity regression without being flaky on slow CI runners.
+    run = make_slots(NOW, 900, price=1.0)
+    slots = assign_credibilities(run, NOW, gamble_tolerance=100.0)
+
+    start = time.perf_counter()
+    result = find_optimal_slots(
+        slots, required_slots=225, ready_by_dt=NOW + timedelta(hours=500), min_block_hours=1.0, algorithm="optimal"
+    )
+    elapsed = time.perf_counter() - start
+
+    assert len(result) == 225
+    assert elapsed < 2.0
+
+
+def test_find_optimal_slots_hybrid_stays_fast_with_a_large_window_and_run():
+    # Same scale again, against "hybrid" -- expected to stay close to greedy's
+    # speed since it narrows the search to a handful of representative sizes
+    # before searching exactly, unlike "optimal" which explores every k.
+    run = make_slots(NOW, 900, price=1.0)
+    slots = assign_credibilities(run, NOW, gamble_tolerance=100.0)
+
+    start = time.perf_counter()
+    result = find_optimal_slots(
+        slots, required_slots=225, ready_by_dt=NOW + timedelta(hours=500), min_block_hours=1.0, algorithm="hybrid"
+    )
+    elapsed = time.perf_counter() - start
+
+    assert len(result) == 225
+    assert elapsed < 1.0
+
+
+def test_find_optimal_slots_unknown_algorithm_falls_back_to_greedy():
+    slots = assign_credibilities(make_slots(NOW, 2, price=5.0), NOW, 100.0)
+    result = find_optimal_slots(
+        slots, required_slots=2, ready_by_dt=NOW + timedelta(hours=5), min_block_hours=1.0, algorithm="not_a_real_algo"
+    )
+    assert len(result) == 2
+
+
 def test_slots_to_sessions_groups_contiguous_runs():
     run1 = make_slots(NOW, 2, price=10.0)
     run2 = make_slots(NOW + timedelta(hours=3), 2, price=20.0)

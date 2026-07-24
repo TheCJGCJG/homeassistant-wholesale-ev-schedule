@@ -177,6 +177,14 @@
           "force_on": "Force on",
           "force_off": "Force off"
         }
+      },
+      "optimization_algorithm": {
+        "name": "Optimization algorithm",
+        "state": {
+          "greedy": "Greedy (fast, occasionally suboptimal)",
+          "optimal": "Optimal (exact, slower on long horizons)",
+          "hybrid": "Hybrid (fast, usually optimal)"
+        }
       }
     },
     "button": {

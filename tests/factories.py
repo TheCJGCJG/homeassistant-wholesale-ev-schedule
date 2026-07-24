@@ -135,7 +135,7 @@ _ENTITY_SUFFIXES = {
         "assumed_charge_kwh",
     ],
     "datetime": ["ready_by"],
-    "select": ["charge_override"],
+    "select": ["charge_override", "optimization_algorithm"],
     "button": ["boost_cancel", "stop", "reset"],
 }
 
