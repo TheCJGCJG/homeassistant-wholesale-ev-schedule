@@ -179,6 +179,21 @@ def set_octopus_rate_entity(hass, entity_id: str, points: list[dict]) -> None:
     hass.states.async_set(entity_id, "populated", {"rates": points})
 
 
+def priced_points(start: datetime, prices: list[float], step_minutes: int = 30) -> list[dict]:
+    """Build `rates` attribute entries from an explicit per-slot price list --
+    for tests that need a specific price shape (cheap dips at chosen
+    positions, spikes, etc.) rather than octopus_rate_points' single uniform
+    rate."""
+    return [
+        {
+            "start": (start + timedelta(minutes=step_minutes * i)).isoformat(),
+            "end": (start + timedelta(minutes=step_minutes * (i + 1))).isoformat(),
+            "value_inc_vat": price,
+        }
+        for i, price in enumerate(prices)
+    ]
+
+
 async def async_setup_wholesale_entry(hass, options: dict | None = None, name: str = DEFAULT_NAME) -> MockConfigEntry:
     entry = MockConfigEntry(
         domain=DOMAIN,
