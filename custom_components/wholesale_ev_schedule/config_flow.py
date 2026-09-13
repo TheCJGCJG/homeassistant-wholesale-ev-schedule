@@ -36,9 +36,13 @@ from .const import (
     CONF_DEFAULT_GAMBLE_TOLERANCE,
     CONF_DEFAULT_MAX_PRICE,
     CONF_DEFAULT_MIN_BLOCK_HOURS,
+    CONF_DEFAULT_OPPORTUNISTIC_MAX_PRICE,
+    CONF_DEFAULT_OPPORTUNISTIC_OFFSET_DAYS,
+    CONF_DEFAULT_OPPORTUNISTIC_TARGET_HOURS,
     CONF_DEFAULT_READY_BY_DAY_OFFSET,
     CONF_DEFAULT_READY_BY_HOUR,
     CONF_DEFAULT_REQUIRED_HOURS,
+    CONF_ENABLE_OPPORTUNISTIC_CHARGING,
     CONF_FORECAST_ATTRIBUTE,
     CONF_FORECAST_DATETIME_KEY,
     CONF_FORECAST_ENTITY,
@@ -52,10 +56,14 @@ from .const import (
     CONF_RATES_ATTRIBUTE,
     CONF_RATES_PROVIDER,
     CONF_UPDATE_INTERVAL_MINUTES,
+    DEFAULT_ENABLE_OPPORTUNISTIC_CHARGING,
     DEFAULT_GAMBLE_TOLERANCE,
     DEFAULT_MAX_PRICE,
     DEFAULT_MIN_BLOCK_HOURS,
     DEFAULT_NAME,
+    DEFAULT_OPPORTUNISTIC_MAX_PRICE,
+    DEFAULT_OPPORTUNISTIC_OFFSET_DAYS,
+    DEFAULT_OPPORTUNISTIC_TARGET_HOURS,
     DEFAULT_RATE_UNIT_MULTIPLIER,
     DEFAULT_READY_BY_DAY_OFFSET,
     DEFAULT_READY_BY_HOUR,
@@ -167,6 +175,30 @@ def base_schema(defaults: dict[str, Any], include_name: bool) -> vol.Schema:
                 CONF_DEFAULT_READY_BY_DAY_OFFSET,
                 default=str(defaults.get(CONF_DEFAULT_READY_BY_DAY_OFFSET, DEFAULT_READY_BY_DAY_OFFSET)),
             ): _READY_BY_DAY_OFFSET_SELECT,
+            # Opportunistic charging (issue #53): a second, opt-in tier on top
+            # of the required one above -- see const.py's
+            # CONF_ENABLE_OPPORTUNISTIC_CHARGING block. Defaults to off, so an
+            # install that never touches this produces no new entities (see
+            # switch.py/number.py/datetime.py/sensor.py's async_setup_entry
+            # guards) and behaves exactly as before this feature existed.
+            _with_default(
+                CONF_ENABLE_OPPORTUNISTIC_CHARGING, defaults, DEFAULT_ENABLE_OPPORTUNISTIC_CHARGING
+            ): selector.BooleanSelector(),
+            _with_default(
+                CONF_DEFAULT_OPPORTUNISTIC_OFFSET_DAYS, defaults, DEFAULT_OPPORTUNISTIC_OFFSET_DAYS
+            ): selector.NumberSelector(
+                selector.NumberSelectorConfig(min=1, max=30, step=1, mode=selector.NumberSelectorMode.BOX)
+            ),
+            _with_default(
+                CONF_DEFAULT_OPPORTUNISTIC_TARGET_HOURS, defaults, DEFAULT_OPPORTUNISTIC_TARGET_HOURS
+            ): selector.NumberSelector(
+                selector.NumberSelectorConfig(min=0, max=24, step=0.5, mode=selector.NumberSelectorMode.BOX)
+            ),
+            _with_default(
+                CONF_DEFAULT_OPPORTUNISTIC_MAX_PRICE, defaults, DEFAULT_OPPORTUNISTIC_MAX_PRICE
+            ): selector.NumberSelector(
+                selector.NumberSelectorConfig(min=0, max=200, step=0.1, mode=selector.NumberSelectorMode.BOX)
+            ),
         }
     )
     return vol.Schema(schema)
