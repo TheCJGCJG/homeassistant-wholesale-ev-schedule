@@ -158,6 +158,7 @@ class WholesaleEvScheduleCoordinator(DataUpdateCoordinator[dict]):
 
         self._stored_sessions: list[dict] = []
         self._boost_end: datetime | None = None
+        self._delivered_hours: float = 0.0
 
     @property
     def instance_name(self) -> str:
@@ -210,6 +211,7 @@ class WholesaleEvScheduleCoordinator(DataUpdateCoordinator[dict]):
         )
         self._stored_sessions = self._sanitize_stored_sessions(data.get("sessions", []))
         self._boost_end = self._parse_stored_dt(data.get("boost_end"), "boost_end")
+        self._delivered_hours = self._parse_stored_float(data.get("delivered_hours"), 0.0, "delivered_hours")
         await self._async_save_stored_state()
 
     def _sanitize_stored_sessions(self, raw: object) -> list[dict]:
@@ -301,6 +303,7 @@ class WholesaleEvScheduleCoordinator(DataUpdateCoordinator[dict]):
                 "assumed_charge_kwh": self.assumed_charge_kwh,
                 "sessions": self._stored_sessions,
                 "boost_end": self._boost_end.isoformat() if self._boost_end else None,
+                "delivered_hours": self._delivered_hours,
             }
         )
 
@@ -322,6 +325,9 @@ class WholesaleEvScheduleCoordinator(DataUpdateCoordinator[dict]):
     async def async_set_required_hours(self, value: float) -> None:
         self._reject_non_finite(value, "required_hours")
         self.required_hours = value
+        # A new target starts fresh -- hours delivered under whatever the
+        # previous required_hours was don't carry over and offset it.
+        self._delivered_hours = 0.0
         await self._async_save_stored_state()
         await self.async_refresh()
 
@@ -378,6 +384,7 @@ class WholesaleEvScheduleCoordinator(DataUpdateCoordinator[dict]):
         self._stored_sessions = []
         self._boost_end = None
         self.required_hours = 0.0
+        self._delivered_hours = 0.0
         await self._async_save_stored_state()
         await self.async_refresh()
 
@@ -401,6 +408,7 @@ class WholesaleEvScheduleCoordinator(DataUpdateCoordinator[dict]):
         self.optimization_algorithm = DEFAULT_OPTIMIZATION_ALGORITHM
         self._stored_sessions = []
         self._boost_end = None
+        self._delivered_hours = 0.0
         await self._async_save_stored_state()
         await self.async_refresh()
 
@@ -503,10 +511,34 @@ class WholesaleEvScheduleCoordinator(DataUpdateCoordinator[dict]):
             + self._parse_forecast_entity(options.get(CONF_FORECAST_ENTITY))
         )
 
+    def _accrue_delivered_hours(self, now_dt: datetime) -> None:
+        """Credit self._delivered_hours with the duration of any stored session
+        that has now fully ended, before prune_and_classify drops it for good.
+
+        required_hours has no other memory of charging completed in an earlier
+        update cycle -- prune_and_classify only ever reports the *current*
+        active/future split, so once a finished session ages out, nothing else
+        records that it happened. Without this, _compute_sessions would see
+        "no active session" and required_hours still at its original value and
+        schedule a brand new session from scratch, even though the requirement
+        was already met (hours_remaining bouncing back up after completion).
+        """
+        for s in self._stored_sessions:
+            end = parse_dt(s["end"])
+            if end <= now_dt:
+                start = parse_dt(s["start"])
+                self._delivered_hours += (end - start).total_seconds() / 3600
+
     def _compute_sessions(self, all_prices: list[dict], now_dt: datetime) -> list[dict]:
+        self._accrue_delivered_hours(now_dt)
         active_session, _ = prune_and_classify(self._stored_sessions, now_dt)
+
+        required_slots = max(1, math.ceil(self.required_hours * 2))
+        delivered_slots = math.ceil(round(self._delivered_hours * 2, 6))
+        slots_still_needed = max(0, required_slots - delivered_slots)
+
         now_prices = deduplicate_and_sort_prices(all_prices, now_dt)
-        if not now_prices:
+        if not now_prices or slots_still_needed <= 0:
             return [active_session] if active_session else []
 
         adjusted = assign_credibilities(now_prices, now_dt, self.gamble_tolerance)
@@ -518,16 +550,15 @@ class WholesaleEvScheduleCoordinator(DataUpdateCoordinator[dict]):
             active_start = parse_dt(active_session["start"])
             active_end = parse_dt(active_session["end"])
             candidate_slots = [s for s in adjusted if not (active_start <= s["date_time"] < active_end)]
-
-        required_slots = max(1, math.ceil(self.required_hours * 2))
-        slots_still_needed = required_slots
-        if active_session:
+            # The active session's own remaining duration also counts toward
+            # what's still needed, on top of delivered_slots (which only
+            # covers sessions that have already fully ended).
             duration_h = active_session.get("duration_hours")
             if duration_h is None:
                 end = parse_dt(active_session["end"])
                 start = parse_dt(active_session["start"])
                 duration_h = (end - start).total_seconds() / 3600
-            slots_still_needed = max(0, required_slots - math.ceil(duration_h * 2))
+            slots_still_needed = max(0, slots_still_needed - math.ceil(duration_h * 2))
 
         future_sessions = []
         if slots_still_needed > 0:
@@ -562,6 +593,11 @@ class WholesaleEvScheduleCoordinator(DataUpdateCoordinator[dict]):
         # something that needs resetting by hand every day.
         if self.ready_by is None or self.ready_by <= now_dt:
             self.ready_by = next_ready_by(now_dt, self._default_ready_by_hour, self._default_ready_by_day_offset)
+            # A new ready_by cycle is a fresh "charge N hours by this deadline"
+            # request -- hours delivered toward the previous deadline don't
+            # carry over and offset the next one (see issue: hours_remaining
+            # bouncing back up after a completed overnight session).
+            self._delivered_hours = 0.0
             await self._async_save_stored_state()
 
         if self.required_hours <= 0:
@@ -687,8 +723,11 @@ class WholesaleEvScheduleCoordinator(DataUpdateCoordinator[dict]):
     ) -> dict:
         active, future = prune_and_classify(sessions, now_dt)
         hours_remaining = compute_hours_remaining(future, active, now_dt)
+        required_slots = max(1, math.ceil(self.required_hours * 2))
+        delivered_slots = math.ceil(round(self._delivered_hours * 2, 6))
+        already_fulfilled = delivered_slots >= required_slots
 
-        if not sessions and active is None and self.required_hours > 0:
+        if not sessions and active is None and self.required_hours > 0 and not already_fulfilled:
             reason = self._unschedulable_reason(now_dt, all_prices)
             return self._with_diagnostics(
                 {
