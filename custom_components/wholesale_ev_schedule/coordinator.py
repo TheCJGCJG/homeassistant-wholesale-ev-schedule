@@ -23,6 +23,9 @@ from .const import (
     CONF_DEFAULT_GAMBLE_TOLERANCE,
     CONF_DEFAULT_MAX_PRICE,
     CONF_DEFAULT_MIN_BLOCK_HOURS,
+    CONF_DEFAULT_OPPORTUNISTIC_MAX_PRICE,
+    CONF_DEFAULT_OPPORTUNISTIC_OFFSET_DAYS,
+    CONF_DEFAULT_OPPORTUNISTIC_TARGET_HOURS,
     CONF_DEFAULT_READY_BY_DAY_OFFSET,
     CONF_DEFAULT_READY_BY_HOUR,
     CONF_DEFAULT_REQUIRED_HOURS,
@@ -49,6 +52,9 @@ from .const import (
     DEFAULT_MAX_PRICE,
     DEFAULT_MIN_BLOCK_HOURS,
     DEFAULT_NAME,
+    DEFAULT_OPPORTUNISTIC_MAX_PRICE,
+    DEFAULT_OPPORTUNISTIC_OFFSET_DAYS,
+    DEFAULT_OPPORTUNISTIC_TARGET_HOURS,
     DEFAULT_OPTIMIZATION_ALGORITHM,
     DEFAULT_RATE_START_KEY,
     DEFAULT_RATE_UNIT_MULTIPLIER,
@@ -91,6 +97,16 @@ _VALID_OPTIMIZATION_ALGORITHMS = {
     OPTIMIZATION_ALGORITHM_HYBRID,
 }
 
+# Which charging tier a session dict belongs to (see _compute_sessions and
+# _accrue_delivered_hours) -- distinct from scheduler.py's TIER_ACTUAL/
+# TIER_PREDICTED_* price-credibility tiers, which mean something unrelated.
+# SESSION_TIER_REQUIRED is also the implicit default for any session dict
+# with no "tier" key at all (`.get("tier", SESSION_TIER_REQUIRED)`), which
+# covers every session persisted by an install from before opportunistic
+# charging existed -- an upgrade must never misroute or drop that state.
+SESSION_TIER_REQUIRED = "required"
+SESSION_TIER_OPPORTUNISTIC = "opportunistic"
+
 
 class WholesaleEvScheduleCoordinator(DataUpdateCoordinator[dict]):
     """Reads wholesale price entities and computes the EV charging schedule.
@@ -107,7 +123,7 @@ class WholesaleEvScheduleCoordinator(DataUpdateCoordinator[dict]):
     _async_update_data), so "charge N hours by 7am" renews itself daily
     without manual resetting.
 
-    The six self._default_* attributes below are read once at construction
+    The self._default_* attributes below are read once at construction
     from the config entry's options (CONF_DEFAULT_*, see const.py) — they're
     the setup-time "sensible defaults" from issue #2: what a fresh install
     (no stored state yet) starts with, and what the "Reset" button restores
@@ -146,6 +162,18 @@ class WholesaleEvScheduleCoordinator(DataUpdateCoordinator[dict]):
         self._default_ready_by_day_offset: int = int(
             entry.options.get(CONF_DEFAULT_READY_BY_DAY_OFFSET, DEFAULT_READY_BY_DAY_OFFSET)
         )
+        # Opportunistic charging (issue #53) setup-time defaults -- same
+        # "sensible defaults" role as the block above, just for the opt-in
+        # second tier. See const.py's CONF_ENABLE_OPPORTUNISTIC_CHARGING block.
+        self._default_opportunistic_offset_days: int = int(
+            entry.options.get(CONF_DEFAULT_OPPORTUNISTIC_OFFSET_DAYS, DEFAULT_OPPORTUNISTIC_OFFSET_DAYS)
+        )
+        self._default_opportunistic_target_hours: float = float(
+            entry.options.get(CONF_DEFAULT_OPPORTUNISTIC_TARGET_HOURS, DEFAULT_OPPORTUNISTIC_TARGET_HOURS)
+        )
+        self._default_opportunistic_max_price: float = float(
+            entry.options.get(CONF_DEFAULT_OPPORTUNISTIC_MAX_PRICE, DEFAULT_OPPORTUNISTIC_MAX_PRICE)
+        )
 
         self.ready_by: datetime | None = None
         self.required_hours: float = self._default_required_hours
@@ -155,6 +183,19 @@ class WholesaleEvScheduleCoordinator(DataUpdateCoordinator[dict]):
         self.charge_override: str = DEFAULT_CHARGE_OVERRIDE
         self.optimization_algorithm: str = DEFAULT_OPTIMIZATION_ALGORITHM
         self.assumed_charge_kwh: float = DEFAULT_ASSUMED_CHARGE_KWH
+
+        # Opportunistic charging live state. opportunistic_ready_by has no
+        # fixed default of its own -- like ready_by, it's set on first use and
+        # re-derived every time ready_by rolls forward (see
+        # _async_update_data): always `ready_by + default_opportunistic_offset_days`
+        # at that moment. A live edit via async_set_opportunistic_ready_by
+        # holds only until the next such rollover, then snaps back -- it is
+        # deliberately NOT an independent value the way ready_by itself is.
+        self.opportunistic_enabled: bool = False
+        self.opportunistic_target_hours: float = self._default_opportunistic_target_hours
+        self.opportunistic_max_price: float = self._default_opportunistic_max_price
+        self.opportunistic_ready_by: datetime | None = None
+        self._delivered_opportunistic_hours: float = 0.0
 
         self._stored_sessions: list[dict] = []
         self._boost_end: datetime | None = None
@@ -212,6 +253,33 @@ class WholesaleEvScheduleCoordinator(DataUpdateCoordinator[dict]):
         self._stored_sessions = self._sanitize_stored_sessions(data.get("sessions", []))
         self._boost_end = self._parse_stored_dt(data.get("boost_end"), "boost_end")
         self._delivered_hours = self._parse_stored_float(data.get("delivered_hours"), 0.0, "delivered_hours")
+
+        # Opportunistic charging state. A missing/invalid opportunistic_enabled
+        # degrades to False (same "off by default" stance as a fresh install),
+        # not raise -- a stored non-bool here (schema drift, a manual edit) is
+        # our own responsibility same as every other _parse_stored_* helper.
+        self.opportunistic_enabled = bool(data.get("opportunistic_enabled", False))
+        self.opportunistic_target_hours = self._parse_stored_float(
+            data.get("opportunistic_target_hours"),
+            self._default_opportunistic_target_hours,
+            "opportunistic_target_hours",
+        )
+        self.opportunistic_max_price = self._parse_stored_float(
+            data.get("opportunistic_max_price"), self._default_opportunistic_max_price, "opportunistic_max_price"
+        )
+        self.opportunistic_ready_by = self._parse_stored_dt(
+            data.get("opportunistic_ready_by"), "opportunistic_ready_by"
+        )
+        if self.opportunistic_ready_by is None:
+            # Never stored (a fresh install, or an upgrade from before
+            # opportunistic charging existed) -- seed it the same way it
+            # would be derived on the next required-ready_by rollover
+            # (_async_update_data), rather than leaving it None until that
+            # rollover actually happens, which could be hours or days away.
+            self.opportunistic_ready_by = self.ready_by + timedelta(days=self._default_opportunistic_offset_days)
+        self._delivered_opportunistic_hours = self._parse_stored_float(
+            data.get("delivered_opportunistic_hours"), 0.0, "delivered_opportunistic_hours"
+        )
         await self._async_save_stored_state()
 
     def _sanitize_stored_sessions(self, raw: object) -> list[dict]:
@@ -304,6 +372,13 @@ class WholesaleEvScheduleCoordinator(DataUpdateCoordinator[dict]):
                 "sessions": self._stored_sessions,
                 "boost_end": self._boost_end.isoformat() if self._boost_end else None,
                 "delivered_hours": self._delivered_hours,
+                "opportunistic_enabled": self.opportunistic_enabled,
+                "opportunistic_target_hours": self.opportunistic_target_hours,
+                "opportunistic_max_price": self.opportunistic_max_price,
+                "opportunistic_ready_by": self.opportunistic_ready_by.isoformat()
+                if self.opportunistic_ready_by
+                else None,
+                "delivered_opportunistic_hours": self._delivered_opportunistic_hours,
             }
         )
 
@@ -328,6 +403,44 @@ class WholesaleEvScheduleCoordinator(DataUpdateCoordinator[dict]):
         # A new target starts fresh -- hours delivered under whatever the
         # previous required_hours was don't carry over and offset it.
         self._delivered_hours = 0.0
+        await self._async_save_stored_state()
+        await self.async_refresh()
+
+    async def async_set_opportunistic_enabled(self, value: bool) -> None:
+        """Live pause/resume for opportunistic charging -- unlike the setup-time
+        CONF_ENABLE_OPPORTUNISTIC_CHARGING toggle (which controls whether the
+        entities exist at all), this doesn't touch opportunistic_target_hours
+        or any other stored opportunistic value: off just means _compute_sessions
+        treats the opportunistic target as 0 for this cycle, so re-enabling
+        instantly resumes with everything intact."""
+        self.opportunistic_enabled = value
+        await self._async_save_stored_state()
+        await self.async_refresh()
+
+    async def async_set_opportunistic_target_hours(self, value: float) -> None:
+        self._reject_non_finite(value, "opportunistic_target_hours")
+        self.opportunistic_target_hours = value
+        # Same reasoning as async_set_required_hours: a new target starts
+        # fresh, unoffset by whatever was delivered under the previous one.
+        self._delivered_opportunistic_hours = 0.0
+        await self._async_save_stored_state()
+        await self.async_refresh()
+
+    async def async_set_opportunistic_max_price(self, value: float) -> None:
+        self._reject_non_finite(value, "opportunistic_max_price")
+        self.opportunistic_max_price = value
+        await self._async_save_stored_state()
+        await self.async_refresh()
+
+    async def async_set_opportunistic_ready_by(self, value: datetime) -> None:
+        """Live-editable, but only as a one-cycle override: the next time the
+        required ready_by itself rolls forward (see _async_update_data), this
+        gets forcibly re-derived as `ready_by + default_opportunistic_offset_days`
+        regardless of what was set here -- "unless it's been hand-modified, it
+        always just +7 days" (the offset is configurable; 7 is only the
+        out-of-the-box default), and a hand-modification only holds for the
+        current cycle, not indefinitely."""
+        self.opportunistic_ready_by = dt_util.as_local(value)
         await self._async_save_stored_state()
         await self.async_refresh()
 
@@ -377,14 +490,18 @@ class WholesaleEvScheduleCoordinator(DataUpdateCoordinator[dict]):
 
     async def async_stop(self) -> None:
         """Kill/end the current session: cancel today's schedule and any
-        boost, and drop required_hours to 0 (idle) — but keep ready_by and
-        every tuning preference untouched. Useful when you've decided not to
-        charge today but the same deadline and preferences still apply
-        tomorrow."""
+        boost, and drop required_hours (and, symmetrically,
+        opportunistic_target_hours) to 0 -- but keep ready_by/opportunistic_ready_by
+        and every tuning preference (including opportunistic_max_price and
+        whether opportunistic is enabled) untouched. Useful when you've
+        decided not to charge today but the same deadlines and preferences
+        still apply tomorrow."""
         self._stored_sessions = []
         self._boost_end = None
         self.required_hours = 0.0
         self._delivered_hours = 0.0
+        self.opportunistic_target_hours = 0.0
+        self._delivered_opportunistic_hours = 0.0
         await self._async_save_stored_state()
         await self.async_refresh()
 
@@ -393,11 +510,25 @@ class WholesaleEvScheduleCoordinator(DataUpdateCoordinator[dict]):
         class docstring): ready_by (next self._default_ready_by_hour, at
         least self._default_ready_by_day_offset days out), required_hours,
         gamble tolerance, min block hours, max price, assumed charge kWh, the
-        charge override, and the optimization algorithm, on top of clearing
-        the schedule and any boost like async_stop does. Intended to be
-        triggered by an automation on charger-unplugged, so the next plug-in
-        starts from a completely clean slate rather than carrying over
-        yesterday's tweaks."""
+        charge override, the optimization algorithm, and -- symmetrically --
+        opportunistic_target_hours/opportunistic_max_price back to their own
+        setup-time defaults, and opportunistic_ready_by back to
+        ready_by + default_opportunistic_offset_days, on top of clearing the
+        schedule and any boost like async_stop does. Intended to be triggered
+        by an automation on charger-unplugged, so the next plug-in starts
+        from a completely clean slate rather than carrying over yesterday's
+        tweaks.
+
+        opportunistic_ready_by is re-derived directly here rather than left
+        None for _async_update_data's rollover check to pick up next cycle --
+        that check only fires when self.ready_by <= now_dt, which is never
+        true immediately after this method sets ready_by to a fresh future
+        value, so leaving it None would silently stop opportunistic
+        scheduling (_compute_opportunistic_sessions short-circuits on a falsy
+        opportunistic_ready_by) until the reset ready_by itself later expires
+        -- the same gap async_load_stored_state's own derivation exists to
+        avoid on a fresh install/restart.
+        """
         self.ready_by = next_ready_by(dt_util.now(), self._default_ready_by_hour, self._default_ready_by_day_offset)
         self.required_hours = self._default_required_hours
         self.gamble_tolerance = self._default_gamble_tolerance
@@ -406,6 +537,10 @@ class WholesaleEvScheduleCoordinator(DataUpdateCoordinator[dict]):
         self.assumed_charge_kwh = DEFAULT_ASSUMED_CHARGE_KWH
         self.charge_override = DEFAULT_CHARGE_OVERRIDE
         self.optimization_algorithm = DEFAULT_OPTIMIZATION_ALGORITHM
+        self.opportunistic_target_hours = self._default_opportunistic_target_hours
+        self.opportunistic_max_price = self._default_opportunistic_max_price
+        self.opportunistic_ready_by = self.ready_by + timedelta(days=self._default_opportunistic_offset_days)
+        self._delivered_opportunistic_hours = 0.0
         self._stored_sessions = []
         self._boost_end = None
         self._delivered_hours = 0.0
@@ -512,33 +647,44 @@ class WholesaleEvScheduleCoordinator(DataUpdateCoordinator[dict]):
         )
 
     def _accrue_delivered_hours(self, now_dt: datetime) -> None:
-        """Credit self._delivered_hours with the duration of any stored session
-        that has now fully ended, before prune_and_classify drops it for good.
+        """Credit self._delivered_hours/_delivered_opportunistic_hours with the
+        duration of any stored session that has now fully ended, before
+        prune_and_classify drops it for good -- routed by the session's own
+        "tier" tag (see SESSION_TIER_REQUIRED/SESSION_TIER_OPPORTUNISTIC),
+        defaulting missing/untagged sessions to required so state persisted by
+        an install from before opportunistic charging existed still accrues
+        correctly on upgrade.
 
-        required_hours has no other memory of charging completed in an earlier
-        update cycle -- prune_and_classify only ever reports the *current*
-        active/future split, so once a finished session ages out, nothing else
-        records that it happened. Without this, _compute_sessions would see
-        "no active session" and required_hours still at its original value and
-        schedule a brand new session from scratch, even though the requirement
-        was already met (hours_remaining bouncing back up after completion).
+        required_hours/opportunistic_target_hours have no other memory of
+        charging completed in an earlier update cycle -- prune_and_classify
+        only ever reports the *current* active/future split, so once a
+        finished session ages out, nothing else records that it happened.
+        Without this, _compute_sessions would see "no active session" and the
+        target still at its original value and schedule a brand new session
+        from scratch, even though the requirement was already met
+        (hours_remaining bouncing back up after completion).
         """
         for s in self._stored_sessions:
             end = parse_dt(s["end"])
             if end <= now_dt:
                 start = parse_dt(s["start"])
-                self._delivered_hours += (end - start).total_seconds() / 3600
+                duration = (end - start).total_seconds() / 3600
+                if s.get("tier", SESSION_TIER_REQUIRED) == SESSION_TIER_OPPORTUNISTIC:
+                    self._delivered_opportunistic_hours += duration
+                else:
+                    self._delivered_hours += duration
 
     def _compute_sessions(self, all_prices: list[dict], now_dt: datetime) -> list[dict]:
         self._accrue_delivered_hours(now_dt)
         active_session, _ = prune_and_classify(self._stored_sessions, now_dt)
+        active_tier = active_session.get("tier", SESSION_TIER_REQUIRED) if active_session else None
 
         required_slots = max(1, math.ceil(self.required_hours * 2))
         delivered_slots = math.ceil(round(self._delivered_hours * 2, 6))
         slots_still_needed = max(0, required_slots - delivered_slots)
 
         now_prices = deduplicate_and_sort_prices(all_prices, now_dt)
-        if not now_prices or slots_still_needed <= 0:
+        if not now_prices:
             return [active_session] if active_session else []
 
         adjusted = assign_credibilities(now_prices, now_dt, self.gamble_tolerance)
@@ -550,19 +696,21 @@ class WholesaleEvScheduleCoordinator(DataUpdateCoordinator[dict]):
             active_start = parse_dt(active_session["start"])
             active_end = parse_dt(active_session["end"])
             candidate_slots = [s for s in adjusted if not (active_start <= s["date_time"] < active_end)]
-            # The active session's own remaining duration also counts toward
-            # what's still needed, on top of delivered_slots (which only
-            # covers sessions that have already fully ended).
-            duration_h = active_session.get("duration_hours")
-            if duration_h is None:
-                end = parse_dt(active_session["end"])
-                start = parse_dt(active_session["start"])
-                duration_h = (end - start).total_seconds() / 3600
-            slots_still_needed = max(0, slots_still_needed - math.ceil(duration_h * 2))
+            if active_tier == SESSION_TIER_REQUIRED:
+                # The active session's own remaining duration also counts
+                # toward what's still needed, on top of delivered_slots
+                # (which only covers sessions that have already fully ended).
+                duration_h = active_session.get("duration_hours")
+                if duration_h is None:
+                    end = parse_dt(active_session["end"])
+                    start = parse_dt(active_session["start"])
+                    duration_h = (end - start).total_seconds() / 3600
+                slots_still_needed = max(0, slots_still_needed - math.ceil(duration_h * 2))
 
-        future_sessions = []
+        required_future_sessions = []
+        required_future_dts: set = set()
         if slots_still_needed > 0:
-            future_slots = find_optimal_slots(
+            required_future_slots = find_optimal_slots(
                 candidate_slots,
                 slots_still_needed,
                 self.ready_by,
@@ -570,9 +718,74 @@ class WholesaleEvScheduleCoordinator(DataUpdateCoordinator[dict]):
                 max_price=self.max_price,
                 algorithm=self.optimization_algorithm,
             )
-            future_sessions = slots_to_sessions(future_slots)
+            required_future_dts = {s["date_time"] for s in required_future_slots}
+            required_future_sessions = slots_to_sessions(required_future_slots)
+        for s in required_future_sessions:
+            s["tier"] = SESSION_TIER_REQUIRED
+        if active_session and active_tier == SESSION_TIER_REQUIRED:
+            active_session["tier"] = SESSION_TIER_REQUIRED
 
-        return ([active_session] if active_session else []) + future_sessions
+        opportunistic_sessions = self._compute_opportunistic_sessions(
+            candidate_slots, required_future_dts, active_session, active_tier, now_dt
+        )
+
+        return ([active_session] if active_session else []) + required_future_sessions + opportunistic_sessions
+
+    def _compute_opportunistic_sessions(
+        self,
+        candidate_slots: list[dict],
+        required_future_dts: set,
+        active_session: dict | None,
+        active_tier: str | None,
+        now_dt: datetime,
+    ) -> list[dict]:
+        """The opportunistic tier's own version of the future-session block in
+        _compute_sessions above: nets opportunistic_target_hours against
+        _delivered_opportunistic_hours (and the active session's own
+        remaining duration, if it's an opportunistic one that's currently
+        running), then searches for extra slots -- excluding whatever the
+        required tier already claimed this cycle -- capped by
+        opportunistic_ready_by and opportunistic_max_price instead of the
+        required tier's own ready_by/max_price.
+
+        Opportunistic never runs at all if disabled, has no target hours set,
+        or has no opportunistic_ready_by yet (the very first cycle before any
+        ready_by rollover has ever happened) -- required-tier scheduling above
+        is completely unaffected either way, since this only ever consumes
+        slots required did NOT claim.
+        """
+        if not self.opportunistic_enabled or self.opportunistic_target_hours <= 0 or not self.opportunistic_ready_by:
+            return []
+
+        opp_required_slots = max(1, math.ceil(self.opportunistic_target_hours * 2))
+        opp_delivered_slots = math.ceil(round(self._delivered_opportunistic_hours * 2, 6))
+        opp_slots_still_needed = max(0, opp_required_slots - opp_delivered_slots)
+
+        opp_candidate_slots = candidate_slots
+        if active_session and active_tier == SESSION_TIER_OPPORTUNISTIC:
+            duration_h = active_session.get("duration_hours")
+            if duration_h is None:
+                end = parse_dt(active_session["end"])
+                start = parse_dt(active_session["start"])
+                duration_h = (end - start).total_seconds() / 3600
+            opp_slots_still_needed = max(0, opp_slots_still_needed - math.ceil(duration_h * 2))
+
+        if opp_slots_still_needed <= 0:
+            return []
+
+        opp_candidate_slots = [s for s in opp_candidate_slots if s["date_time"] not in required_future_dts]
+        opp_slots = find_optimal_slots(
+            opp_candidate_slots,
+            opp_slots_still_needed,
+            self.opportunistic_ready_by,
+            self.min_block_hours,
+            max_price=self.opportunistic_max_price,
+            algorithm=self.optimization_algorithm,
+        )
+        opportunistic_sessions = slots_to_sessions(opp_slots)
+        for s in opportunistic_sessions:
+            s["tier"] = SESSION_TIER_OPPORTUNISTIC
+        return opportunistic_sessions
 
     async def _async_update_data(self) -> dict:
         now_dt = dt_util.now()
@@ -598,6 +811,15 @@ class WholesaleEvScheduleCoordinator(DataUpdateCoordinator[dict]):
             # carry over and offset the next one (see issue: hours_remaining
             # bouncing back up after a completed overnight session).
             self._delivered_hours = 0.0
+            # opportunistic_ready_by always re-derives here, every time
+            # required ready_by rolls forward -- this is the ONE place a live
+            # edit to it (via async_set_opportunistic_ready_by) gets
+            # overwritten. That's deliberate: a manual edit is a one-cycle
+            # override, not a permanent switch to independence -- "unless
+            # it's been hand-modified, it always just +N days" holds for
+            # exactly one required-ready_by cycle at a time.
+            self.opportunistic_ready_by = self.ready_by + timedelta(days=self._default_opportunistic_offset_days)
+            self._delivered_opportunistic_hours = 0.0
             await self._async_save_stored_state()
 
         if self.required_hours <= 0:
@@ -613,10 +835,34 @@ class WholesaleEvScheduleCoordinator(DataUpdateCoordinator[dict]):
         await self._async_save_stored_state()
         return self._schedule_result(sessions, now_dt, price_summary, all_prices)
 
+    def _opportunistic_diagnostics(self, sessions: list[dict], now_dt: datetime) -> dict:
+        """The opportunistic-tier equivalents of active_slot/next_slot/
+        upcoming_slots/hours_remaining -- same prune_and_classify +
+        compute_hours_remaining pair the combined (required + opportunistic)
+        fields already use, just restricted to sessions tagged
+        SESSION_TIER_OPPORTUNISTIC. `sessions` here is a list already
+        containing both tiers (self._stored_sessions, or a freshly computed
+        one) -- filtering happens here rather than requiring every call site
+        to pre-filter."""
+        opportunistic_sessions = [
+            s for s in sessions if s.get("tier", SESSION_TIER_REQUIRED) == SESSION_TIER_OPPORTUNISTIC
+        ]
+        active, future = prune_and_classify(opportunistic_sessions, now_dt)
+        return {
+            "opportunistic_active_slot": active,
+            "opportunistic_next_slot": future[0] if future else None,
+            "opportunistic_upcoming_slots": future,
+            "opportunistic_hours_remaining": compute_hours_remaining(future, active, now_dt),
+        }
+
     def _with_diagnostics(self, result: dict, price_summary: dict) -> dict:
         result["price_summary"] = price_summary
         result.setdefault("boost_end", None)
         result.setdefault("upcoming_slots", [])
+        result.setdefault("opportunistic_active_slot", None)
+        result.setdefault("opportunistic_next_slot", None)
+        result.setdefault("opportunistic_upcoming_slots", [])
+        result.setdefault("opportunistic_hours_remaining", 0.0)
         result["block_count"] = len(result.get("sessions", []))
 
         # The manual override is the final word on `desired`, applied after
@@ -665,6 +911,7 @@ class WholesaleEvScheduleCoordinator(DataUpdateCoordinator[dict]):
                 "hours_remaining": hours_remaining,
                 "error_reason": reason,
                 "calculated_at": now_dt.isoformat(),
+                **self._opportunistic_diagnostics(self._stored_sessions, now_dt),
             },
             price_summary,
         )
@@ -684,6 +931,7 @@ class WholesaleEvScheduleCoordinator(DataUpdateCoordinator[dict]):
                 "error_reason": None,
                 "calculated_at": now_dt.isoformat(),
                 "boost_end": self._boost_end.isoformat(),
+                **self._opportunistic_diagnostics(self._stored_sessions, now_dt),
             },
             price_summary,
         )
@@ -739,6 +987,7 @@ class WholesaleEvScheduleCoordinator(DataUpdateCoordinator[dict]):
                     "hours_remaining": self.required_hours,
                     "error_reason": reason,
                     "calculated_at": now_dt.isoformat(),
+                    **self._opportunistic_diagnostics(sessions, now_dt),
                 },
                 price_summary,
             )
@@ -762,6 +1011,7 @@ class WholesaleEvScheduleCoordinator(DataUpdateCoordinator[dict]):
                 "hours_remaining": hours_remaining,
                 "error_reason": None,
                 "calculated_at": now_dt.isoformat(),
+                **self._opportunistic_diagnostics(sessions, now_dt),
             },
             price_summary,
         )

@@ -14,10 +14,15 @@
           "default_max_price": "Default maximum price",
           "default_min_block_hours": "Default minimum block length",
           "default_ready_by_hour": "Default ready-by hour",
-          "default_ready_by_day_offset": "Default ready-by day"
+          "default_ready_by_day_offset": "Default ready-by day",
+          "enable_opportunistic_charging": "Enable opportunistic charging",
+          "default_opportunistic_offset_days": "Opportunistic ready-by offset (days after required)",
+          "default_opportunistic_target_hours": "Default opportunistic target hours",
+          "default_opportunistic_max_price": "Default opportunistic maximum price"
         },
         "data_description": {
-          "update_interval_minutes": "How often prices are re-fetched and the full schedule recomputed. Charging desired also re-evaluates every minute on the clock regardless of this setting, so on/off transitions always land within about a minute of the real slot boundary."
+          "update_interval_minutes": "How often prices are re-fetched and the full schedule recomputed. Charging desired also re-evaluates every minute on the clock regardless of this setting, so on/off transitions always land within about a minute of the real slot boundary.",
+          "enable_opportunistic_charging": "Adds a second, optional charging tier that tops up beyond your required hours whenever prices are especially cheap, up to its own later deadline. Off by default — no extra entities are created unless you turn this on."
         }
       },
       "rates_octopus_energy": {
@@ -89,10 +94,15 @@
           "default_max_price": "Default maximum price",
           "default_min_block_hours": "Default minimum block length",
           "default_ready_by_hour": "Default ready-by hour",
-          "default_ready_by_day_offset": "Default ready-by day"
+          "default_ready_by_day_offset": "Default ready-by day",
+          "enable_opportunistic_charging": "Enable opportunistic charging",
+          "default_opportunistic_offset_days": "Opportunistic ready-by offset (days after required)",
+          "default_opportunistic_target_hours": "Default opportunistic target hours",
+          "default_opportunistic_max_price": "Default opportunistic maximum price"
         },
         "data_description": {
-          "update_interval_minutes": "How often prices are re-fetched and the full schedule recomputed. Charging desired also re-evaluates every minute on the clock regardless of this setting, so on/off transitions always land within about a minute of the real slot boundary."
+          "update_interval_minutes": "How often prices are re-fetched and the full schedule recomputed. Charging desired also re-evaluates every minute on the clock regardless of this setting, so on/off transitions always land within about a minute of the real slot boundary.",
+          "enable_opportunistic_charging": "Adds a second, optional charging tier that tops up beyond your required hours whenever prices are especially cheap, up to its own later deadline. Off by default — no extra entities are created unless you turn this on."
         }
       },
       "rates_octopus_energy": {
@@ -153,7 +163,10 @@
       "average_price_next_24h": { "name": "Average price (next 24h)" },
       "average_price_all_data": { "name": "Average price (all available data)" },
       "price_data_sources": { "name": "Price data sources" },
-      "active_providers": { "name": "Active providers" }
+      "active_providers": { "name": "Active providers" },
+      "opportunistic_hours_remaining": { "name": "Opportunistic hours remaining" },
+      "opportunistic_next_slot_start": { "name": "Opportunistic next slot start" },
+      "opportunistic_next_slot_end": { "name": "Opportunistic next slot end" }
     },
     "binary_sensor": {
       "charging_desired": { "name": "Charging desired" }
@@ -164,10 +177,16 @@
       "gamble_tolerance": { "name": "Gamble tolerance" },
       "min_block_hours": { "name": "Minimum block length" },
       "max_price": { "name": "Maximum price" },
-      "assumed_charge_kwh": { "name": "Assumed charge kWh" }
+      "assumed_charge_kwh": { "name": "Assumed charge kWh" },
+      "opportunistic_target_hours": { "name": "Opportunistic target hours" },
+      "opportunistic_max_price": { "name": "Opportunistic maximum price" }
     },
     "datetime": {
-      "ready_by": { "name": "Ready by" }
+      "ready_by": { "name": "Ready by" },
+      "opportunistic_ready_by": { "name": "Opportunistic ready by" }
+    },
+    "switch": {
+      "opportunistic_charging_enabled": { "name": "Opportunistic charging enabled" }
     },
     "select": {
       "charge_override": {

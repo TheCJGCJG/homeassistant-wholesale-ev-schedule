@@ -21,7 +21,7 @@ from homeassistant.core import HomeAssistant
 from homeassistant.helpers.entity import EntityCategory
 from homeassistant.helpers.entity_platform import AddEntitiesCallback
 
-from .const import DOMAIN
+from .const import CONF_ENABLE_OPPORTUNISTIC_CHARGING, DOMAIN
 from .coordinator import WholesaleEvScheduleCoordinator
 from .entity import WholesaleEvScheduleEntity
 from .scheduler import parse_dt
@@ -29,40 +29,59 @@ from .scheduler import parse_dt
 
 async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry, async_add_entities: AddEntitiesCallback) -> None:
     coordinator: WholesaleEvScheduleCoordinator = hass.data[DOMAIN][entry.entry_id]
-    async_add_entities(
-        [
-            EvChargingStateSensor(coordinator),
-            EvChargingScheduleSensor(coordinator),
-            _SlotBoundaryTimeSensor(coordinator, "next_slot_start", "next_slot_start", "mdi:clock-start", "start"),
-            _SlotBoundaryTimeSensor(coordinator, "next_slot_end", "next_slot_end", "mdi:clock-end", "end"),
-            EvChargingNextSlotAveragePriceSensor(coordinator),
-            EvChargingNextSlotEstimatedCostSensor(coordinator),
-            EvChargingHoursRemainingSensor(coordinator),
-            EvChargingTimeRemainingSensor(coordinator),
-            EvChargingBoostEndsAtSensor(coordinator),
-            # Diagnostics — hidden by default.
-            EvChargingBlockCountSensor(coordinator),
-            _DiagnosticSlotBoundaryTimeSensor(
-                coordinator, "upcoming_block_2_start", "upcoming_block_2_start", "mdi:clock-start", "start", 1
+    entities: list[SensorEntity] = [
+        EvChargingStateSensor(coordinator),
+        EvChargingScheduleSensor(coordinator),
+        _SlotBoundaryTimeSensor(coordinator, "next_slot_start", "next_slot_start", "mdi:clock-start", "start"),
+        _SlotBoundaryTimeSensor(coordinator, "next_slot_end", "next_slot_end", "mdi:clock-end", "end"),
+        EvChargingNextSlotAveragePriceSensor(coordinator),
+        EvChargingNextSlotEstimatedCostSensor(coordinator),
+        EvChargingHoursRemainingSensor(coordinator),
+        EvChargingTimeRemainingSensor(coordinator),
+        EvChargingBoostEndsAtSensor(coordinator),
+        # Diagnostics — hidden by default.
+        EvChargingBlockCountSensor(coordinator),
+        _DiagnosticSlotBoundaryTimeSensor(
+            coordinator, "upcoming_block_2_start", "upcoming_block_2_start", "mdi:clock-start", "start", 1
+        ),
+        _DiagnosticSlotBoundaryTimeSensor(
+            coordinator, "upcoming_block_2_end", "upcoming_block_2_end", "mdi:clock-end", "end", 1
+        ),
+        _DiagnosticSlotBoundaryTimeSensor(
+            coordinator, "upcoming_block_3_start", "upcoming_block_3_start", "mdi:clock-start", "start", 2
+        ),
+        _DiagnosticSlotBoundaryTimeSensor(
+            coordinator, "upcoming_block_3_end", "upcoming_block_3_end", "mdi:clock-end", "end", 2
+        ),
+        EvChargingCandidatePricePointsSensor(coordinator),
+        EvChargingCheapestAvailablePriceSensor(coordinator),
+        EvChargingMostExpensiveAvailablePriceSensor(coordinator),
+        EvChargingAveragePriceNext24hSensor(coordinator),
+        EvChargingAveragePriceAllDataSensor(coordinator),
+        EvChargingPriceDataSourcesSensor(coordinator),
+        EvChargingActiveProvidersSensor(coordinator),
+    ]
+    if entry.options.get(CONF_ENABLE_OPPORTUNISTIC_CHARGING, False):
+        entities += [
+            EvOpportunisticHoursRemainingSensor(coordinator),
+            _SlotBoundaryTimeSensor(
+                coordinator,
+                "opportunistic_next_slot_start",
+                "opportunistic_next_slot_start",
+                "mdi:clock-start",
+                "start",
+                data_key="opportunistic_next_slot",
             ),
-            _DiagnosticSlotBoundaryTimeSensor(
-                coordinator, "upcoming_block_2_end", "upcoming_block_2_end", "mdi:clock-end", "end", 1
+            _SlotBoundaryTimeSensor(
+                coordinator,
+                "opportunistic_next_slot_end",
+                "opportunistic_next_slot_end",
+                "mdi:clock-end",
+                "end",
+                data_key="opportunistic_next_slot",
             ),
-            _DiagnosticSlotBoundaryTimeSensor(
-                coordinator, "upcoming_block_3_start", "upcoming_block_3_start", "mdi:clock-start", "start", 2
-            ),
-            _DiagnosticSlotBoundaryTimeSensor(
-                coordinator, "upcoming_block_3_end", "upcoming_block_3_end", "mdi:clock-end", "end", 2
-            ),
-            EvChargingCandidatePricePointsSensor(coordinator),
-            EvChargingCheapestAvailablePriceSensor(coordinator),
-            EvChargingMostExpensiveAvailablePriceSensor(coordinator),
-            EvChargingAveragePriceNext24hSensor(coordinator),
-            EvChargingAveragePriceAllDataSensor(coordinator),
-            EvChargingPriceDataSourcesSensor(coordinator),
-            EvChargingActiveProvidersSensor(coordinator),
         ]
-    )
+    async_add_entities(entities)
 
 
 def _upcoming_slot(coordinator: WholesaleEvScheduleCoordinator, index: int) -> dict | None:
@@ -154,6 +173,11 @@ class _SlotBoundaryTimeSensor(WholesaleEvScheduleEntity, SensorEntity):
     below were otherwise six near-identical classes differing only in these
     values (see issue #30). slot_index=None means "the next slot"; an int
     means upcoming_slots[slot_index] via _upcoming_slot.
+
+    data_key selects which coordinator.data key holds "the next slot" when
+    slot_index is None -- "next_slot" (the default, every existing call site)
+    for the combined/required-tier reading, or "opportunistic_next_slot" for
+    the opportunistic tier's own next-slot sensors.
     """
 
     _attr_device_class = SensorDeviceClass.TIMESTAMP
@@ -166,17 +190,19 @@ class _SlotBoundaryTimeSensor(WholesaleEvScheduleEntity, SensorEntity):
         icon: str,
         boundary_key: str,
         slot_index: int | None = None,
+        data_key: str = "next_slot",
     ) -> None:
         super().__init__(coordinator, "sensor", unique_id_suffix)
         self._attr_translation_key = translation_key
         self._attr_icon = icon
         self._boundary_key = boundary_key
         self._slot_index = slot_index
+        self._data_key = data_key
 
     @property
     def native_value(self) -> datetime | None:
         if self._slot_index is None:
-            slot = self.coordinator.data.get("next_slot") if self.coordinator.data else None
+            slot = self.coordinator.data.get(self._data_key) if self.coordinator.data else None
         else:
             slot = _upcoming_slot(self.coordinator, self._slot_index)
         return parse_dt(slot[self._boundary_key]) if slot else None
@@ -250,6 +276,25 @@ class EvChargingHoursRemainingSensor(WholesaleEvScheduleEntity, SensorEntity):
         if not self.coordinator.data:
             return None
         return round(self.coordinator.data.get("hours_remaining", 0.0), 2)
+
+
+class EvOpportunisticHoursRemainingSensor(WholesaleEvScheduleEntity, SensorEntity):
+    """Hours of uncommenced committed opportunistic charging -- the
+    opportunistic-tier equivalent of EvChargingHoursRemainingSensor."""
+
+    _attr_translation_key = "opportunistic_hours_remaining"
+    _attr_icon = "mdi:timer-plus-outline"
+    _attr_native_unit_of_measurement = "h"
+    _attr_state_class = SensorStateClass.MEASUREMENT
+
+    def __init__(self, coordinator: WholesaleEvScheduleCoordinator) -> None:
+        super().__init__(coordinator, "sensor", "opportunistic_hours_remaining")
+
+    @property
+    def native_value(self) -> float | None:
+        if not self.coordinator.data:
+            return None
+        return round(self.coordinator.data.get("opportunistic_hours_remaining", 0.0), 2)
 
 
 class EvChargingTimeRemainingSensor(WholesaleEvScheduleEntity, SensorEntity):

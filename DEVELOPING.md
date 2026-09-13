@@ -16,9 +16,11 @@ custom_components/wholesale_ev_schedule/
   entity.py         shared base — forces the <prefix>_ entity_id namespace
   sensor.py         primary + diagnostic (hidden-by-default) output sensors
   binary_sensor.py  charging_desired output
-  number.py         live inputs: hours required, boost duration, scheduling tolerances
-  datetime.py       ready_by — live input
+  number.py         live inputs: hours required, boost duration, scheduling tolerances,
+                    opportunistic target hours/max price (opt-in, see below)
+  datetime.py       ready_by, opportunistic_ready_by — live inputs
   select.py         charge_override, optimization_algorithm — manual overrides
+  switch.py         opportunistic_charging_enabled — live pause/resume (opt-in)
   button.py         boost_cancel, stop, reset — actions
   brand/            icon/logo shown in the HA UI (local brand images, HA 2026.3+)
 ```
@@ -69,6 +71,41 @@ custom_components/wholesale_ev_schedule/
   see `_async_update_data` in `coordinator.py`. This makes "charge N hours by
   7am" a standing daily target instead of something that errors out or needs
   resetting by hand.
+- **Opportunistic charging (issue #53) is a second, opt-in tier layered on
+  top of the required one, gated behind `CONF_ENABLE_OPPORTUNISTIC_CHARGING`
+  (`const.py`, default `False`).** `switch.py`/`number.py`/`datetime.py`/
+  `sensor.py`'s opportunistic entity classes are only added when that option
+  is set — an install that never opts in gets zero new entities/behaviour
+  (`tests/test_opportunistic_config_flow.py`'s
+  `test_opportunistic_disabled_produces_exactly_the_default_entity_set`
+  guards this structurally: the default `FULL_OPTIONS`-based setup must
+  still equal the pre-existing `EXPECTED_ENTITY_IDS` exactly).
+  `_compute_sessions` (`coordinator.py`) runs the required tier first,
+  completely unchanged, then `_compute_opportunistic_sessions` searches only
+  the candidate slots required didn't claim, capped by
+  `opportunistic_ready_by`/`opportunistic_max_price` instead of
+  `ready_by`/`max_price`. Each resulting session is tagged
+  `"tier": SESSION_TIER_REQUIRED` or `SESSION_TIER_OPPORTUNISTIC` (missing
+  tag defaults to required, so a session persisted before this feature
+  existed still accrues correctly on upgrade) — `_accrue_delivered_hours`
+  routes a completed session's duration to `_delivered_hours` or
+  `_delivered_opportunistic_hours` by that tag, mirroring the required
+  tier's own delivered-hours accounting (issue #57 / PR #58) exactly.
+  `opportunistic_ready_by` has no independently-tracked value of its own the
+  way `ready_by` does: it's always re-derived as
+  `ready_by + default_opportunistic_offset_days` at the moment `ready_by`
+  itself rolls forward (the same rollover block in `_async_update_data`,
+  and also in `async_load_stored_state`/`async_reset`, both of which set
+  `ready_by` directly and so must derive it themselves rather than rely on
+  that rollover check, which only fires when `ready_by <= now_dt` — never
+  true immediately after either of those sets a fresh future `ready_by`). A
+  live edit via `async_set_opportunistic_ready_by` is a one-cycle-only
+  override that snaps back to the derived value on the next such rollover.
+  Turning the setup-time toggle back off explicitly removes any
+  already-created opportunistic entities from the registry
+  (`_async_remove_opportunistic_entities_if_disabled` in `__init__.py`,
+  matched by the `"_opportunistic_"` infix in each entity's `unique_id`)
+  rather than leaving them orphaned/unavailable.
 - **`async_setup_entry` (`__init__.py`) registers a wall-clock-aligned minute
   tick via `async_track_time_change(hass, ..., second=0)`, in addition to the
   coordinator's own `update_interval_minutes` polling.** A `DataUpdateCoordinator`'s
@@ -150,6 +187,13 @@ What each test file covers:
 - `tests/test_estimated_cost.py` — next-slot average price and the estimated-cost sensor derived from it via assumed_charge_kwh, including live updates when the number changes, persistence, reset restoring its default, and the calculation breakdown exposed as attributes
 - `tests/test_minute_tick.py` — the wall-clock-aligned minute tick (`async_track_time_change` in `__init__.py`) triggers a coordinator refresh at the next :00 second boundary well before a full `update_interval_minutes` has elapsed, and its listener is torn down on unload
 - `tests/test_long_running_simulation.py` — continuous operation across several simulated days including a real DST transition (no crashes, ready_by keeps rolling over correctly), and a genuine unload+re-setup restart producing a brand-new coordinator instance that rehydrates fully from storage
+- `tests/test_required_hours_completion.py` — issue #57/PR #58 regression: hours_remaining doesn't bounce back up once a completed session's required_hours has genuinely been met, and delivered_hours resets correctly when required_hours is changed again
+- `tests/test_week_long_scheduling.py` — required-tier delivered-hours correctness across a multi-day ready_by horizon: varying horizon lengths, a multi-session schedule surviving a price reshuffle after the first session completes, and max_price enforced per-block (not globally) both when it does and doesn't block the requirement
+- `tests/test_opportunistic_config_flow.py` — opportunistic entity-creation gating: disabled produces exactly the pre-existing default entity set, enabled produces that set plus the four opportunistic entities, all carrying the instance prefix
+- `tests/test_opportunistic_scheduling.py` — required-vs-opportunistic layering (opportunistic never claims a slot required still needs), opportunistic_max_price independent of max_price, a zero target being a no-op, the live enabled switch pausing/resuming without clearing configuration, and opportunistic delivered-hours accrual/reset
+- `tests/test_opportunistic_ready_by_rollover.py` — opportunistic_ready_by defaulting to ready_by + offset, a manual edit holding only until the next required-ready_by rollover, rolling forward correctly across several rollovers, and a manual edit to required ready_by NOT itself perturbing opportunistic_ready_by
+- `tests/test_opportunistic_lifecycle.py` — Stop zeroes the opportunistic target but keeps tuning preferences/deadline; Reset restores opportunistic defaults and re-derives opportunistic_ready_by immediately (not left unset until the next natural rollover); opportunistic state survives a genuine restart; a pre-opportunistic stored session with no "tier" key defaults to the required counter on upgrade
+- `tests/test_opportunistic_reconfigure.py` — enabling/disabling opportunistic charging via the actual options-flow UI walk adds/removes exactly the opportunistic entities, and a direct options update takes effect after reload
 
 ## Linting and security scanning
 

@@ -104,6 +104,11 @@ Schedule**. You'll be asked for:
    restores those live values to. Leave them alone for the same behaviour as
    before (12h / 50% / 20 / 4h / next 7am). All are editable later from the
    integration's **Configure** option.
+6. **Enable opportunistic charging** (optional, off by default) — adds a
+   second, opt-in charging tier; see
+   [Opportunistic charging](#opportunistic-charging) below. Leave it off for
+   the exact same behaviour as before this option existed — nothing changes
+   unless you switch it on, here or later via **Configure**.
 
 That's it for one-time setup. Everything else — how many hours you need,
 by when, and the scheduling tolerances below — is adjusted afterwards as
@@ -152,13 +157,14 @@ configurable at setup time, most people won't need to touch them):
   but the same deadline still applies tomorrow).
 - **Reset** (button) — puts everything back to defaults: ready-by, hours
   required, gamble tolerance, minimum block length, max price, assumed
-  charge kWh, the charge override, and the optimization algorithm, on top of
-  clearing the schedule and any boost like Stop does. Handy to wire to an
-  automation that fires when your charger becomes unplugged, so the next
-  time you plug in you're starting completely fresh. Which values Reset
-  restores (other than assumed charge kWh, the charge override, and the
-  optimization algorithm, which are fixed) is controlled by the optional
-  defaults set at setup time — see [Setup](#setup) above.
+  charge kWh, the charge override, the optimization algorithm, and (if
+  enabled) opportunistic target hours and opportunistic maximum price, on
+  top of clearing the schedule and any boost like Stop does. Handy to wire
+  to an automation that fires when your charger becomes unplugged, so the
+  next time you plug in you're starting completely fresh. Which values
+  Reset restores (other than assumed charge kWh, the charge override, and
+  the optimization algorithm, which are fixed) is controlled by the
+  optional defaults set at setup time — see [Setup](#setup) above.
 
 **Manual override:**
 - **Charge override** (`select`: Auto / Force On / Force Off) — leave on
@@ -189,6 +195,42 @@ If you've noticed a scheduled session that looks like it's leaving cheaper
 prices on the table, switching to Optimal (or Hybrid, if Optimal feels too
 slow to compute) is the fix.
 
+## Opportunistic charging
+
+**Off by default — nothing here affects you unless you turn it on.** Turn it
+on at [Setup](#setup) or later via **Configure**.
+
+Charging hours required (above) is a **floor**: charge this much, by this
+deadline, at any price up to your maximum price. Opportunistic charging adds
+an optional **ceiling** on top of that floor: extra hours you'd like if — and
+only if — the price is genuinely good, with its own deadline and its own
+(usually stricter) price cap. Typical use: "I need 40% charge by 7am on a
+weekday, but if there's a cheap or negative-rate window sometime this week,
+top the car up further."
+
+Once enabled, four more entities appear:
+
+- **Opportunistic charging enabled** (`switch`) — live pause/resume. Off
+  pauses opportunistic scheduling for that cycle without touching any of the
+  settings below — turning it back on resumes exactly where you left off.
+- **Opportunistic target hours** (`number`, default 0) — extra hours to aim
+  for on top of the required floor. 0 means configured but inactive.
+- **Opportunistic maximum price** (`number`, default 20) — its own price
+  ceiling, completely independent of (never derived from) maximum price
+  above — set it tighter if "opportunistic" should mean "genuinely cheap,"
+  not just "whatever my normal cap already allows."
+- **Opportunistic ready by** (`datetime`) — the opportunistic deadline.
+  Defaults to, and auto-resets to, **ready-by + 7 days** every time ready-by
+  itself rolls forward to a new day (both are configurable at setup time —
+  see [Setup](#setup)). You can push it out further by hand for a one-off
+  (e.g. "grab a good price for a trip next month"), but it snaps back to the
+  +7-day default the next time ready-by rolls over — it's not a separate,
+  independently-tracked deadline the way ready-by itself is.
+
+Opportunistic charging only ever fills slots the required tier didn't
+already claim, and never at the cost of the required floor being met — it's
+strictly additional, on top of, never instead of.
+
 ## What you'll see
 
 - **State** — idle / scheduled / charging / boosting / complete /
@@ -204,6 +246,9 @@ slow to compute) is the fix.
   is left.
 - **Charging desired** (`binary_sensor`) — the actual on/off signal; see
   below for wiring this to your charger.
+- **Opportunistic hours remaining** / **Opportunistic next slot start / end**
+  (only if [opportunistic charging](#opportunistic-charging) is enabled) —
+  the same readings as above, scoped to the opportunistic tier only.
 
 There's also a set of hidden diagnostic sensors (block count, further
 upcoming blocks, price ranges/averages, which data sources are active) —

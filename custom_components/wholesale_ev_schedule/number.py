@@ -7,23 +7,27 @@ from homeassistant.config_entries import ConfigEntry
 from homeassistant.core import HomeAssistant
 from homeassistant.helpers.entity_platform import AddEntitiesCallback
 
-from .const import DOMAIN
+from .const import CONF_ENABLE_OPPORTUNISTIC_CHARGING, DOMAIN
 from .coordinator import WholesaleEvScheduleCoordinator
 from .entity import WholesaleEvScheduleEntity
 
 
 async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry, async_add_entities: AddEntitiesCallback) -> None:
     coordinator: WholesaleEvScheduleCoordinator = hass.data[DOMAIN][entry.entry_id]
-    async_add_entities(
-        [
-            EvChargingHoursRequiredNumber(coordinator),
-            EvChargingBoostDurationNumber(coordinator),
-            EvChargingGambleToleranceNumber(coordinator),
-            EvChargingMinBlockHoursNumber(coordinator),
-            EvChargingMaxPriceNumber(coordinator),
-            EvChargingAssumedChargeKwhNumber(coordinator),
+    entities: list[NumberEntity] = [
+        EvChargingHoursRequiredNumber(coordinator),
+        EvChargingBoostDurationNumber(coordinator),
+        EvChargingGambleToleranceNumber(coordinator),
+        EvChargingMinBlockHoursNumber(coordinator),
+        EvChargingMaxPriceNumber(coordinator),
+        EvChargingAssumedChargeKwhNumber(coordinator),
+    ]
+    if entry.options.get(CONF_ENABLE_OPPORTUNISTIC_CHARGING, False):
+        entities += [
+            EvOpportunisticTargetHoursNumber(coordinator),
+            EvOpportunisticMaxPriceNumber(coordinator),
         ]
-    )
+    async_add_entities(entities)
 
 
 class EvChargingHoursRequiredNumber(WholesaleEvScheduleEntity, NumberEntity):
@@ -164,3 +168,51 @@ class EvChargingAssumedChargeKwhNumber(WholesaleEvScheduleEntity, NumberEntity):
 
     async def async_set_native_value(self, value: float) -> None:
         await self.coordinator.async_set_assumed_charge_kwh(value)
+
+
+class EvOpportunisticTargetHoursNumber(WholesaleEvScheduleEntity, NumberEntity):
+    """Extra hours to aim for on top of the required floor, only using slots
+    priced under opportunistic_max_price by opportunistic_ready_by. 0 means
+    opportunistic charging is configured but has no target -- a no-op, same
+    as charging_hours_required <= 0 meaning idle for the required tier."""
+
+    _attr_translation_key = "opportunistic_target_hours"
+    _attr_icon = "mdi:battery-charging-high"
+    _attr_native_min_value = 0.0
+    _attr_native_max_value = 24.0
+    _attr_native_step = 0.5
+    _attr_native_unit_of_measurement = "h"
+    _attr_mode = NumberMode.BOX
+
+    def __init__(self, coordinator: WholesaleEvScheduleCoordinator) -> None:
+        super().__init__(coordinator, "number", "opportunistic_target_hours")
+
+    @property
+    def native_value(self) -> float:
+        return self.coordinator.opportunistic_target_hours
+
+    async def async_set_native_value(self, value: float) -> None:
+        await self.coordinator.async_set_opportunistic_target_hours(value)
+
+
+class EvOpportunisticMaxPriceNumber(WholesaleEvScheduleEntity, NumberEntity):
+    """Maximum average price per opportunistic session -- independent of
+    (never derived from) max_price, so opportunistic charging can be tuned
+    stricter or looser than the required tier's own price ceiling."""
+
+    _attr_translation_key = "opportunistic_max_price"
+    _attr_icon = "mdi:cash-sync"
+    _attr_native_min_value = 0.0
+    _attr_native_max_value = 200.0
+    _attr_native_step = 1.0
+    _attr_mode = NumberMode.BOX
+
+    def __init__(self, coordinator: WholesaleEvScheduleCoordinator) -> None:
+        super().__init__(coordinator, "number", "opportunistic_max_price")
+
+    @property
+    def native_value(self) -> float:
+        return self.coordinator.opportunistic_max_price
+
+    async def async_set_native_value(self, value: float) -> None:
+        await self.coordinator.async_set_opportunistic_max_price(value)

@@ -13,9 +13,13 @@ from custom_components.wholesale_ev_schedule.const import (
     CONF_DEFAULT_GAMBLE_TOLERANCE,
     CONF_DEFAULT_MAX_PRICE,
     CONF_DEFAULT_MIN_BLOCK_HOURS,
+    CONF_DEFAULT_OPPORTUNISTIC_MAX_PRICE,
+    CONF_DEFAULT_OPPORTUNISTIC_OFFSET_DAYS,
+    CONF_DEFAULT_OPPORTUNISTIC_TARGET_HOURS,
     CONF_DEFAULT_READY_BY_DAY_OFFSET,
     CONF_DEFAULT_READY_BY_HOUR,
     CONF_DEFAULT_REQUIRED_HOURS,
+    CONF_ENABLE_OPPORTUNISTIC_CHARGING,
     CONF_FORECAST_ATTRIBUTE,
     CONF_FORECAST_DATETIME_KEY,
     CONF_FORECAST_ENTITY,
@@ -29,10 +33,14 @@ from custom_components.wholesale_ev_schedule.const import (
     CONF_RATES_ATTRIBUTE,
     CONF_RATES_PROVIDER,
     CONF_UPDATE_INTERVAL_MINUTES,
+    DEFAULT_ENABLE_OPPORTUNISTIC_CHARGING,
     DEFAULT_GAMBLE_TOLERANCE,
     DEFAULT_MAX_PRICE,
     DEFAULT_MIN_BLOCK_HOURS,
     DEFAULT_NAME,
+    DEFAULT_OPPORTUNISTIC_MAX_PRICE,
+    DEFAULT_OPPORTUNISTIC_OFFSET_DAYS,
+    DEFAULT_OPPORTUNISTIC_TARGET_HOURS,
     DEFAULT_READY_BY_DAY_OFFSET,
     DEFAULT_READY_BY_HOUR,
     DEFAULT_REQUIRED_HOURS,
@@ -99,7 +107,24 @@ FULL_OPTIONS = {
     CONF_DEFAULT_MIN_BLOCK_HOURS: DEFAULT_MIN_BLOCK_HOURS,
     CONF_DEFAULT_READY_BY_HOUR: DEFAULT_READY_BY_HOUR,
     CONF_DEFAULT_READY_BY_DAY_OFFSET: str(DEFAULT_READY_BY_DAY_OFFSET),
+    # Opportunistic charging (issue #53) -- off by default, same as a real
+    # flow through base_schema() produces when left untouched. See
+    # coordinator.py/switch.py/number.py/datetime.py/sensor.py's
+    # CONF_ENABLE_OPPORTUNISTIC_CHARGING guards: False here means this
+    # options dict (used by the vast majority of tests via
+    # async_setup_wholesale_entry) creates zero opportunistic entities and
+    # exercises zero opportunistic scheduling logic, identical to how a
+    # fresh install behaved before this feature existed.
+    CONF_ENABLE_OPPORTUNISTIC_CHARGING: DEFAULT_ENABLE_OPPORTUNISTIC_CHARGING,
+    CONF_DEFAULT_OPPORTUNISTIC_OFFSET_DAYS: DEFAULT_OPPORTUNISTIC_OFFSET_DAYS,
+    CONF_DEFAULT_OPPORTUNISTIC_TARGET_HOURS: DEFAULT_OPPORTUNISTIC_TARGET_HOURS,
+    CONF_DEFAULT_OPPORTUNISTIC_MAX_PRICE: DEFAULT_OPPORTUNISTIC_MAX_PRICE,
 }
+
+# FULL_OPTIONS with opportunistic charging turned on -- for tests that need
+# the opportunistic entities/scheduling to actually exist. Purely additive:
+# FULL_OPTIONS itself (and every test using it unmodified) is untouched.
+OPPORTUNISTIC_OPTIONS = {**FULL_OPTIONS, CONF_ENABLE_OPPORTUNISTIC_CHARGING: True}
 
 _ENTITY_SUFFIXES = {
     "sensor": [
@@ -149,6 +174,28 @@ def expected_entity_ids(prefix: str = slugify(DEFAULT_NAME)) -> set[str]:
 # integration is designed to run alongside a pre-existing pyscript-based EV
 # charging setup on the same HA instance and must never collide with it.
 EXPECTED_ENTITY_IDS = expected_entity_ids()
+
+# The additional entity_ids created only when opportunistic charging is
+# enabled (see CONF_ENABLE_OPPORTUNISTIC_CHARGING) -- kept separate from
+# _ENTITY_SUFFIXES/EXPECTED_ENTITY_IDS above so those stay exactly what a
+# default (opportunistic-off) install produces, unchanged.
+_OPPORTUNISTIC_ENTITY_SUFFIXES = {
+    "switch": ["opportunistic_charging_enabled"],
+    "number": ["opportunistic_target_hours", "opportunistic_max_price"],
+    "datetime": ["opportunistic_ready_by"],
+    "sensor": ["opportunistic_hours_remaining", "opportunistic_next_slot_start", "opportunistic_next_slot_end"],
+}
+
+
+def expected_opportunistic_entity_ids(prefix: str = slugify(DEFAULT_NAME)) -> set[str]:
+    """The entity_ids created in addition to EXPECTED_ENTITY_IDS when
+    opportunistic charging is enabled."""
+    return {
+        f"{platform}.{prefix}_{suffix}"
+        for platform, suffixes in _OPPORTUNISTIC_ENTITY_SUFFIXES.items()
+        for suffix in suffixes
+    }
+
 
 # The pyscript original's entity_ids — asserted-against as "must never appear".
 PYSCRIPT_ENTITY_IDS = {

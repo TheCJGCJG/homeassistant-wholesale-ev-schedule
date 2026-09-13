@@ -10,6 +10,7 @@ PLATFORMS = [
     Platform.DATETIME,
     Platform.BUTTON,
     Platform.SELECT,
+    Platform.SWITCH,
 ]
 
 # Default value for CONF_NAME — this is slugified into the entity_id prefix
@@ -47,6 +48,34 @@ CONF_DEFAULT_READY_BY_HOUR = "default_ready_by_hour"
 # many days further out ("Next day + 1/2/3"). See scheduler.next_ready_by.
 CONF_DEFAULT_READY_BY_DAY_OFFSET = "default_ready_by_day_offset"
 DEFAULT_READY_BY_DAY_OFFSET = 0
+
+# Config / options keys — opportunistic charging (issue #53): a second,
+# opt-in tier layered on top of the required one above. Required guarantees
+# `required_hours` by `ready_by` at any price up to `max_price` -- unchanged.
+# Opportunistic additionally tops up beyond that floor, but only using slots
+# priced under its own, independent `opportunistic_max_price`, only up to its
+# own `opportunistic_ready_by` (see coordinator.py: this auto-derives as
+# `ready_by + default_opportunistic_offset_days` every time `ready_by` itself
+# rolls forward -- a live edit is a one-cycle override that snaps back on the
+# next rollover, not a permanent switch to independence).
+#
+# Gated behind CONF_ENABLE_OPPORTUNISTIC_CHARGING (default False) so an
+# existing install sees zero new entities/behavior unless explicitly opted
+# in -- see switch.py/number.py/datetime.py/sensor.py's async_setup_entry
+# guards and tests/test_entity_naming.py's exact-set-equality assertion this
+# must not disturb.
+CONF_ENABLE_OPPORTUNISTIC_CHARGING = "enable_opportunistic_charging"
+DEFAULT_ENABLE_OPPORTUNISTIC_CHARGING = False
+
+CONF_DEFAULT_OPPORTUNISTIC_OFFSET_DAYS = "default_opportunistic_offset_days"
+DEFAULT_OPPORTUNISTIC_OFFSET_DAYS = 7
+CONF_DEFAULT_OPPORTUNISTIC_TARGET_HOURS = "default_opportunistic_target_hours"
+DEFAULT_OPPORTUNISTIC_TARGET_HOURS = 0.0
+CONF_DEFAULT_OPPORTUNISTIC_MAX_PRICE = "default_opportunistic_max_price"
+# Intentionally the same starting number as DEFAULT_MAX_PRICE, not a
+# reference to it -- the two are independent live values once set; this only
+# controls what a fresh install (with opportunistic enabled) starts with.
+DEFAULT_OPPORTUNISTIC_MAX_PRICE = 20.0
 
 # Config / options keys — which named provider (see providers.py) supplies each
 # price source. "custom" unlocks the raw attribute/key fields below for a
