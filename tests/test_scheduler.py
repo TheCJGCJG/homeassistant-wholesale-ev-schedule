@@ -6,7 +6,7 @@ this module was ported from.
 """
 
 import time
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta
 from zoneinfo import ZoneInfo
 
 import pytest
@@ -1018,7 +1018,7 @@ def test_next_ready_by_snaps_to_a_valid_time_across_a_dst_spring_forward_gap():
 
     assert result == datetime(2026, 3, 29, 2, 0, tzinfo=london)
     # Confirm it's genuinely a valid local time (round-trips through UTC).
-    assert result.astimezone(timezone.utc).astimezone(london) == result
+    assert result.astimezone(UTC).astimezone(london) == result
 
 
 def test_next_ready_by_unaffected_on_an_ordinary_day():

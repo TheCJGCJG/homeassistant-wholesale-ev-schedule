@@ -10,7 +10,7 @@ from __future__ import annotations
 
 import logging
 import math
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -1028,7 +1028,7 @@ def next_ready_by(now_dt: datetime, hour: int = 7, min_day_offset: int = 0) -> d
         # somewhere becomes 2am->3am), the result may be a local time that never
         # occurred. Round-tripping through UTC snaps it to the real local time
         # at that instant instead of silently keeping an invalid offset (#27).
-        candidate = candidate.astimezone(timezone.utc).astimezone(candidate.tzinfo)
+        candidate = candidate.astimezone(UTC).astimezone(candidate.tzinfo)
     if candidate <= now_dt:
         candidate += timedelta(days=1)
     return candidate
