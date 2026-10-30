@@ -135,6 +135,19 @@ custom_components/wholesale_ev_schedule/
   `coordinator.async_request_refresh()` once a minute at :00 seconds so
   schedule-driven state always catches up to a slot boundary within ~60s,
   regardless of `update_interval_minutes`.
+- **Solves are memoised per tier (`_solve` in `coordinator.py`, issue #60).** The
+  minute tick above re-runs the whole schedule every minute, but the answer only
+  changes when prices, settings or the 30-minute slot boundary do -- and with
+  `optimal`/`hybrid` one solve can take hundreds of ms on a Pi, on the event loop.
+  `_solve` skips `find_optimal_slots` when its inputs equal the previous call's for
+  that tier (required / opportunistic cached independently). The key is every
+  candidate's `(date_time, raw_price, effective_price, tier)` plus the requirement,
+  deadline, `min_block_hours`, cap and algorithm; `effective_price` is what makes
+  credibility tiers shifting as time passes invalidate it. Only the selected
+  `date_time`s are cached and the result is rebuilt from the *current* candidate
+  dicts. If you make `find_optimal_slots` read anything new, **add it to the key**
+  (`tests/test_solve_cache.py` mutation-checks this -- dropping any input from the
+  key fails a test). In-memory only; never persisted.
 - **Setup-time "sensible defaults" (issue #2).** `CONF_DEFAULT_REQUIRED_HOURS`
   / `CONF_DEFAULT_GAMBLE_TOLERANCE` / `CONF_DEFAULT_MAX_PRICE` /
   `CONF_DEFAULT_MIN_BLOCK_HOURS` / `CONF_DEFAULT_READY_BY_HOUR` /
@@ -193,6 +206,7 @@ What each test file covers:
 - `tests/test_scheduler.py` — unit tests for the pure scheduling algorithm, including max_block_hours splitting (the pure capability), next_ready_by (including a DST spring-forward transition), the price-summary diagnostics, and the "optimal"/"hybrid" algorithms against every greedy scenario plus issue #55's reported case
 - `tests/test_block_and_price_constraints.py` — min-block and max_price as guarantees on the returned schedule, across all three algorithms, plus seeded randomised invariants.  Guards the top-up step: remainders must be one contiguous, under-`max_price` window, never scattered single slots
 - `tests/test_calculating_state.py` — the state sensor shows `calculating` mid-recompute for every user-edit path (not periodic refreshes), never flips `charging_desired`, and always clears, even if the refresh fails
+- `tests/test_solve_cache.py` — the solve memo: unchanged refreshes/minute ticks don't re-solve, every input that can change the answer (settings, prices, slot boundary, per-slot fields) forces one, opportunistic-only edits re-solve only that tier, and a seeded random sequence of edits/clock moves always equals an uncached recompute
 - `tests/test_optimization_algorithm.py` — the optimization_algorithm select entity: default value, persistence via the select entity, survival across restarts, an invalid stored value degrading to greedy, reset restoring the default
 - `tests/test_integration_smoke.py` — full config/options flow, entity registration, idle vs error state on a fresh setup given the new defaults
 - `tests/test_providers.py` — custom rates/forecast provider branches, "no forecast" branch, blank custom attribute/key fields rejected, re-enabling forecast after "none"

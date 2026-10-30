@@ -145,6 +145,8 @@ class WholesaleEvScheduleCoordinator(DataUpdateCoordinator[dict]):
         )
         self.entry = entry
         self._calculating = False
+        # tier -> (inputs key, selected date_times); see _solve. In-memory only.
+        self._solve_cache: dict[str, tuple[tuple, frozenset]] = {}
         self._store = Store(hass, STORAGE_VERSION, f"{DOMAIN}_{entry.entry_id}_state")
 
         # Setup-time defaults (see class docstring) -- fall back to the
@@ -712,13 +714,12 @@ class WholesaleEvScheduleCoordinator(DataUpdateCoordinator[dict]):
         required_future_sessions = []
         required_future_dts: set = set()
         if slots_still_needed > 0:
-            required_future_slots = find_optimal_slots(
+            required_future_slots = self._solve(
+                SESSION_TIER_REQUIRED,
                 candidate_slots,
                 slots_still_needed,
                 self.ready_by,
-                self.min_block_hours,
-                max_price=self.max_price,
-                algorithm=self.optimization_algorithm,
+                self.max_price,
             )
             required_future_dts = {s["date_time"] for s in required_future_slots}
             required_future_sessions = slots_to_sessions(required_future_slots)
@@ -732,6 +733,50 @@ class WholesaleEvScheduleCoordinator(DataUpdateCoordinator[dict]):
         )
 
         return ([active_session] if active_session else []) + required_future_sessions + opportunistic_sessions
+
+    def _solve(
+        self,
+        tier: str,
+        candidate_slots: list[dict],
+        required_slots: int,
+        ready_by: datetime,
+        max_price: float,
+    ) -> list[dict]:
+        """find_optimal_slots, skipped when nothing it reads has changed since this
+        tier's previous call (issue #60).
+
+        The wall-clock minute tick re-runs the whole schedule every minute, but the
+        answer only moves when prices, settings or the 30-minute slot boundary do --
+        and with the optimal/hybrid algorithms a solve can take hundreds of ms on a
+        Pi, on the event loop. The key is everything the solver (and
+        slots_to_sessions, via tier) reads: each candidate's time, raw and effective
+        price and tier -- effective_price is in there so credibility tiers shifting
+        as time passes invalidate it -- plus every parameter. One entry per tier
+        (required/opportunistic) is enough: only the latest inputs can recur. Only the
+        selected date_times are cached, and the result is rebuilt from the *current*
+        candidate dicts, so a hit never hands back stale slot objects.
+        """
+        key = (
+            required_slots,
+            ready_by,
+            self.min_block_hours,
+            max_price,
+            self.optimization_algorithm,
+            tuple((s["date_time"], s["raw_price"], s["effective_price"], s["tier"]) for s in candidate_slots),
+        )
+        cached = self._solve_cache.get(tier)
+        if cached is not None and cached[0] == key:
+            return [s for s in candidate_slots if s["date_time"] in cached[1]]
+        result = find_optimal_slots(
+            candidate_slots,
+            required_slots,
+            ready_by,
+            self.min_block_hours,
+            max_price=max_price,
+            algorithm=self.optimization_algorithm,
+        )
+        self._solve_cache[tier] = (key, frozenset(s["date_time"] for s in result))
+        return result
 
     def _compute_opportunistic_sessions(
         self,
@@ -776,13 +821,12 @@ class WholesaleEvScheduleCoordinator(DataUpdateCoordinator[dict]):
             return []
 
         opp_candidate_slots = [s for s in opp_candidate_slots if s["date_time"] not in required_future_dts]
-        opp_slots = find_optimal_slots(
+        opp_slots = self._solve(
+            SESSION_TIER_OPPORTUNISTIC,
             opp_candidate_slots,
             opp_slots_still_needed,
             self.opportunistic_ready_by,
-            self.min_block_hours,
-            max_price=self.opportunistic_max_price,
-            algorithm=self.optimization_algorithm,
+            self.opportunistic_max_price,
         )
         opportunistic_sessions = slots_to_sessions(opp_slots)
         for s in opportunistic_sessions:
