@@ -162,4 +162,7 @@ STATE_CHARGING = "charging"
 STATE_BOOSTING = "boosting"
 STATE_COMPLETE = "complete"
 STATE_UNSCHEDULABLE = "unschedulable"
+# Transient: set by the coordinator while a user edit is being recomputed; never
+# produced by scheduler.determine_state (which stays pure).
+STATE_CALCULATING = "calculating"
 STATE_ERROR = "error"

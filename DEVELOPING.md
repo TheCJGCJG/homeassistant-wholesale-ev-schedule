@@ -54,6 +54,24 @@ custom_components/wholesale_ev_schedule/
   `_min_max_slots_per_block` and `_solve_with_per_run_costs`; added for #55
   (greedy can lose to a combination — often one larger window — whose
   combined total is cheaper than picking the single cheapest window first).
+- **Top-ups are validated, never "cheapest individual slots".** When whole blocks
+  can't make up the full requirement, the remainder is filled by `_best_topup`
+  (used by greedy and the DP algorithms): slots grown outward from the existing
+  blocks plus at most one contiguous window elsewhere, then checked on the blocks
+  they actually produce (≤1 block under `min_block_hours`, every block's average
+  ≤ `max_price`). The earlier version picked the cheapest leftover slots
+  independently, which scattered single 30-minute slots and ignored `max_price`
+  (found on a live install; pinned by `tests/test_block_and_price_constraints.py`).
+  Related: with a `max_price` and no `max_block_hours`, `_min_cost_for_run` tracks
+  real block length (bounded by the requested slot count) instead of collapsing
+  all "free" lengths into one state, because the cap is a whole-block average.
+- **`calculating` is a display-only state (`STATE_CALCULATING`).** `_async_recalculate`
+  (`coordinator.py`) wraps every user-edit refresh: it sets a flag, pushes listeners
+  so the state sensor reads `calculating`, then refreshes. The flag is cleared in a
+  `finally` inside `_async_update_data`, not after `async_refresh` returns, because
+  the coordinator notifies listeners at the end of `async_refresh`. It lives on the
+  sensor (`native_value`), not in `data["state"]`, so `scheduler.determine_state`
+  stays pure and `charging_desired` is untouched while it's showing.
 - **There's no live `max_block_hours` entity** — it was removed as an
   unnecessary second knob (it only ever capped window *selection* size
   without guaranteeing an actual rest period; genuine multi-block scheduling
@@ -117,6 +135,19 @@ custom_components/wholesale_ev_schedule/
   `coordinator.async_request_refresh()` once a minute at :00 seconds so
   schedule-driven state always catches up to a slot boundary within ~60s,
   regardless of `update_interval_minutes`.
+- **Solves are memoised per tier (`_solve` in `coordinator.py`, issue #60).** The
+  minute tick above re-runs the whole schedule every minute, but the answer only
+  changes when prices, settings or the 30-minute slot boundary do -- and with
+  `optimal`/`hybrid` one solve can take hundreds of ms on a Pi, on the event loop.
+  `_solve` skips `find_optimal_slots` when its inputs equal the previous call's for
+  that tier (required / opportunistic cached independently). The key is every
+  candidate's `(date_time, raw_price, effective_price, tier)` plus the requirement,
+  deadline, `min_block_hours`, cap and algorithm; `effective_price` is what makes
+  credibility tiers shifting as time passes invalidate it. Only the selected
+  `date_time`s are cached and the result is rebuilt from the *current* candidate
+  dicts. If you make `find_optimal_slots` read anything new, **add it to the key**
+  (`tests/test_solve_cache.py` mutation-checks this -- dropping any input from the
+  key fails a test). In-memory only; never persisted.
 - **Setup-time "sensible defaults" (issue #2).** `CONF_DEFAULT_REQUIRED_HOURS`
   / `CONF_DEFAULT_GAMBLE_TOLERANCE` / `CONF_DEFAULT_MAX_PRICE` /
   `CONF_DEFAULT_MIN_BLOCK_HOURS` / `CONF_DEFAULT_READY_BY_HOUR` /
@@ -173,6 +204,9 @@ All tests run inside Docker (`public.ecr.aws/docker/library/python:trixie`):
 
 What each test file covers:
 - `tests/test_scheduler.py` — unit tests for the pure scheduling algorithm, including max_block_hours splitting (the pure capability), next_ready_by (including a DST spring-forward transition), the price-summary diagnostics, and the "optimal"/"hybrid" algorithms against every greedy scenario plus issue #55's reported case
+- `tests/test_block_and_price_constraints.py` — min-block and max_price as guarantees on the returned schedule, across all three algorithms, plus seeded randomised invariants.  Guards the top-up step: remainders must be one contiguous, under-`max_price` window, never scattered single slots
+- `tests/test_calculating_state.py` — the state sensor shows `calculating` mid-recompute for every user-edit path (not periodic refreshes), never flips `charging_desired`, and always clears, even if the refresh fails
+- `tests/test_solve_cache.py` — the solve memo: unchanged refreshes/minute ticks don't re-solve, every input that can change the answer (settings, prices, slot boundary, per-slot fields) forces one, opportunistic-only edits re-solve only that tier, and a seeded random sequence of edits/clock moves always equals an uncached recompute
 - `tests/test_optimization_algorithm.py` — the optimization_algorithm select entity: default value, persistence via the select entity, survival across restarts, an invalid stored value degrading to greedy, reset restoring the default
 - `tests/test_integration_smoke.py` — full config/options flow, entity registration, idle vs error state on a fresh setup given the new defaults
 - `tests/test_providers.py` — custom rates/forecast provider branches, "no forecast" branch, blank custom attribute/key fields rejected, re-enabling forecast after "none"

@@ -234,7 +234,8 @@ strictly additional, on top of, never instead of.
 ## What you'll see
 
 - **State** — idle / scheduled / charging / boosting / complete /
-  unschedulable / error, at a glance.
+  unschedulable / error, at a glance. Briefly shows `calculating` while a
+  changed setting is being recomputed, then settles on the real state.
 - **Schedule** — the full list of upcoming charging sessions, with each
   session's start/end time, average price, and confidence.
 - **Next slot start / end** — when the next charging session begins and ends.

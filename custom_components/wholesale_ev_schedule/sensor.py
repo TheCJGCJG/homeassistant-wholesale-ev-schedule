@@ -21,7 +21,7 @@ from homeassistant.core import HomeAssistant
 from homeassistant.helpers.entity import EntityCategory
 from homeassistant.helpers.entity_platform import AddEntitiesCallback
 
-from .const import CONF_ENABLE_OPPORTUNISTIC_CHARGING, DOMAIN
+from .const import CONF_ENABLE_OPPORTUNISTIC_CHARGING, DOMAIN, STATE_CALCULATING
 from .coordinator import WholesaleEvScheduleCoordinator
 from .entity import WholesaleEvScheduleEntity
 from .scheduler import parse_dt
@@ -110,7 +110,8 @@ def _next_slot_average_price(coordinator: WholesaleEvScheduleCoordinator) -> flo
 
 
 class EvChargingStateSensor(WholesaleEvScheduleEntity, SensorEntity):
-    """Current state machine state."""
+    """Current state machine state, or "calculating" while a setting change is
+    being recomputed (see WholesaleEvScheduleCoordinator._async_recalculate)."""
 
     _attr_translation_key = "charging_state"
     _attr_icon = "mdi:state-machine"
@@ -120,6 +121,8 @@ class EvChargingStateSensor(WholesaleEvScheduleEntity, SensorEntity):
 
     @property
     def native_value(self) -> str | None:
+        if self.coordinator.calculating:
+            return STATE_CALCULATING
         return self.coordinator.data.get("state") if self.coordinator.data else None
 
     @property

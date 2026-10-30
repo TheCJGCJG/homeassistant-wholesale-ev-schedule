@@ -10,7 +10,7 @@ from __future__ import annotations
 
 import logging
 import math
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -95,6 +95,94 @@ def build_contiguous_runs(slots: list[dict]) -> list[list[dict]]:
             current_run = [slot]
     runs.append(current_run)
     return runs
+
+
+def _best_topup(
+    pool: list[dict],
+    taken_dts: set,
+    size: int,
+    min_slots_per_block: int,
+    max_price: float | None,
+    max_slots_per_block: int | None,
+) -> list[dict] | None:
+    """Cheapest way to add exactly `size` more slots from `pool` (not already in
+    `taken_dts`) without breaking the block rules, or None if no way exists.
+
+    Fills whatever a block-based selection couldn't (the "last block may end up shorter
+    than min_block_hours" relaxation). It must NOT pick the cheapest individual slots
+    independently: that scattered them into several 1-slot blocks whenever it was
+    cheaper than any valid block, silently defeating min_block_hours (a live install
+    with min_block_hours=2 and 1.5h required got three isolated 30-minute slots).
+
+    Candidates grow the existing selection outward by e slots (cheapest adjacent first --
+    how a pricey slot gets absorbed into a block whose merged average is still fine, e.g.
+    [5, 5, 20, 5] under a cap of 10) and put the other size-e slots in one contiguous
+    window elsewhere, for every split e. Each candidate is then validated on the blocks it
+    actually produces: at most one block may be shorter than min_slots_per_block, and
+    every block's raw average must be <= max_price. max_price is a block average, not a
+    per-slot limit, so it can't be checked slot by slot here (the same reason
+    _min_cost_for_run only checks it where a block's size is decided).
+    """
+    free = [s for s in pool if s["date_time"] not in taken_dts]
+    if size <= 0:
+        return []
+
+    def _valid(extra: list[dict]) -> bool:
+        by_dt = {s["date_time"]: s for s in extra}
+        by_dt.update({s["date_time"]: s for s in pool if s["date_time"] in taken_dts})
+        blocks = build_contiguous_runs([by_dt[dt] for dt in sorted(by_dt)])
+        if sum(1 for blk in blocks if len(blk) < min_slots_per_block) > 1:
+            return False
+        if max_price is None:
+            return True
+        return all(sum(x["raw_price"] for x in blk) / len(blk) <= max_price for blk in blocks)
+
+    step = timedelta(minutes=30)
+    free_by_dt = {s["date_time"]: s for s in free}
+
+    # Slots grown outward from the existing selection, cheapest adjacent slot first;
+    # grown[:e] is the cheapest way to absorb e slots into already-selected blocks.
+    grown: list[dict] = []
+    covered = set(taken_dts)
+    while len(grown) < size:
+        frontier = [
+            free_by_dt[dt] for c in covered for dt in (c - step, c + step) if dt in free_by_dt and dt not in covered
+        ]
+        if not frontier:
+            break
+        pick = min(frontier, key=lambda s: s["effective_price"])
+        grown.append(pick)
+        covered.add(pick["date_time"])
+
+    candidates: list[list[dict]] = []
+    free_runs = build_contiguous_runs(sorted(free, key=lambda s: s["date_time"]))
+    for e in range(min(size, len(grown)) + 1):
+        absorbed = grown[:e]
+        absorbed_dts = {s["date_time"] for s in absorbed}
+        w = size - e
+        if w == 0:
+            candidates.append(absorbed)
+            continue
+        if max_slots_per_block is not None and w > max_slots_per_block:
+            continue
+        # The rest is one contiguous window elsewhere (a single new block, which
+        # _valid then requires to be the only undersized one). Only the cheapest few
+        # per split are kept -- they're tried cheapest first below.
+        windows = []
+        for run in free_runs:
+            for i in range(len(run) - w + 1):
+                window = run[i : i + w]
+                if absorbed_dts.isdisjoint(x["date_time"] for x in window):
+                    windows.append((sum(x["effective_price"] for x in window), window))
+        windows.sort(key=lambda t: t[0])
+        candidates.extend(absorbed + window for _, window in windows[:5])
+
+    # Cheapest first, validating lazily: validation rebuilds every block, so only pay
+    # for it until the first candidate that passes.
+    for cand in sorted(candidates, key=lambda c: sum(s["effective_price"] for s in c)):
+        if _valid(cand):
+            return cand
+    return None
 
 
 def _find_optimal_slots_greedy(
@@ -224,38 +312,45 @@ def _find_optimal_slots_greedy(
                 break
         return selected, left
 
+    def _complete(selected_windows: list[dict], remaining: int) -> set | None:
+        # Only the (few) selected windows' actual date_times are resolved here --
+        # deferring this from window-generation time is exactly what keeps that
+        # loop O(1) per window instead of O(size).
+        selected_dts: set = set()
+        for w in selected_windows:
+            run = valid_runs[w["run_id"]]
+            for s in run[w["start_idx"] : w["start_idx"] + w["size"]]:
+                selected_dts.add(s["date_time"])
+        if remaining == 0:
+            return selected_dts
+        # Relaxed fallback: fill the remainder with the cheapest valid top-up (the last
+        # block may end up shorter than min_block_hours) -- see _best_topup.
+        if remaining < required_slots:
+            window = _best_topup(
+                eligible_from_valid, selected_dts, remaining, min_slots_per_block, max_price, max_slots_per_block
+            )
+            if window is not None:
+                selected_dts.update(s["date_time"] for s in window)
+                return selected_dts
+        return None
+
     selected_windows, remaining = _greedy_select(strict=True)
-    if remaining == required_slots and windows:
-        # Strict selection made zero progress -- e.g. required_slots is split across
-        # separate runs that are each too short to leave a full-size remainder on
-        # their own (see issue #23). Rather than report unschedulable outright, relax
-        # the "leave a neat remainder" preference so at least one window gets picked,
-        # and let the leftover-fallback below top up whatever's left.
+    selected_dts = None
+    if remaining < required_slots:
+        selected_dts = _complete(selected_windows, remaining)
+    if selected_dts is None and windows:
+        # Strict selection made zero progress, or left a remainder no valid top-up can
+        # fill -- e.g. required_slots is split across separate runs that are each too
+        # short to leave a full-size remainder on their own (see issue #23), or the
+        # neat-remainder rule stopped at one window and the leftover would itself need a
+        # block that busts max_price (18 slots at min 8: strict takes 8, leaving 10, but
+        # nothing valid is 9-10 long). Rather than report unschedulable outright, relax
+        # the "leave a neat remainder" preference so more windows get picked, and let the
+        # top-up cover what's left (at most one undersized block).
         selected_windows, remaining = _greedy_select(strict=False)
+        selected_dts = _complete(selected_windows, remaining)
 
-    # Only the (few) selected windows' actual date_times are resolved here --
-    # deferring this from window-generation time is exactly what keeps that
-    # loop O(1) per window instead of O(size).
-    selected_dts: set = set()
-    for w in selected_windows:
-        run = valid_runs[w["run_id"]]
-        for s in run[w["start_idx"] : w["start_idx"] + w["size"]]:
-            selected_dts.add(s["date_time"])
-
-    # Relaxed fallback: top up any small remainder with the cheapest leftover slots
-    # from valid runs (the last block may end up shorter than min_block_hours).
-    if 0 < remaining < required_slots:
-        leftover = sorted(
-            (s for s in eligible_from_valid if s["date_time"] not in selected_dts),
-            key=lambda s: s["effective_price"],
-        )
-        for s in leftover:
-            selected_dts.add(s["date_time"])
-            remaining -= 1
-            if remaining == 0:
-                break
-
-    if remaining > 0:
+    if selected_dts is None:
         return []
 
     result = [s for s in eligible if s["date_time"] in selected_dts]
@@ -304,8 +399,18 @@ def _min_cost_for_run(
     n = len(run)
     k_cap = min(n, k_cap)
     lo = min_slots_per_block
-    unbounded = max_slots_per_block is None
-    hi = lo if unbounded else max_slots_per_block
+    # With no length cap, every "free" length >= lo can collapse into one absorbing state
+    # -- but only if nothing needs the block's real length. max_price does: a block's
+    # average is over ALL its slots, and the collapsed state only knows the last `lo`
+    # (so [40, 1, 1] passed a cap of 10 by checking just its tail). So with a cap, track
+    # real lengths, bounded by k_cap since no block can exceed the slots being asked for.
+    unbounded = max_slots_per_block is None and max_price is None
+    if unbounded:
+        hi = lo
+    elif max_slots_per_block is None:
+        hi = max(lo, k_cap)
+    else:
+        hi = max_slots_per_block
 
     raw_prefix = [0.0]
     for s in run:
@@ -430,6 +535,8 @@ def _solve_with_per_run_costs(
     per_run: list[tuple[list[float], list, list[int]]],
     required_slots: int,
     max_price: float | None,
+    min_slots_per_block: int,
+    max_slots_per_block: int | None = None,
 ) -> list[dict]:
     """Shared final stage for both DP-based algorithms (_find_optimal_slots_optimal,
     _find_optimal_slots_hybrid): given each valid run's _min_cost_for_run cost curve,
@@ -497,28 +604,40 @@ def _solve_with_per_run_costs(
             j -= k
         return selected_dts
 
-    # candidates is never empty: the caller has already checked
-    # len(eligible_from_valid) >= required_slots, so j=0 (combined[0]=0.0, no whole
-    # blocks) always has at least `required_slots` leftover slots to top up with.
+    # May be empty: a top-up must be one contiguous, under-cap window (see
+    # _best_topup), which can legitimately not exist.
+    # Branch and bound over the partial totals j: any top-up of `remaining` slots costs
+    # at least the `remaining` cheapest free prices overall, so visit j in order of that
+    # lower bound and stop once it can't beat the best complete answer found.
+    cheapest_prefix = [0.0]
+    for price in sorted(s["effective_price"] for s in eligible_from_valid):
+        cheapest_prefix.append(cheapest_prefix[-1] + price)
+    order = sorted(
+        (j for j in range(required_slots + 1) if combined[j] != math.inf),
+        key=lambda j: combined[j] + cheapest_prefix[required_slots - j],
+    )
     candidates: list[tuple[set, float]] = []
-    for j in range(required_slots + 1):
-        if combined[j] == math.inf:
-            continue
-        whole_block_dts = _backtrack(j) if j > 0 else set()
+    best_cost = math.inf
+    for j in order:
         remaining = required_slots - j
+        if combined[j] + cheapest_prefix[remaining] >= best_cost:
+            break
+        whole_block_dts = _backtrack(j) if j > 0 else set()
         if remaining == 0:
             candidates.append((whole_block_dts, combined[j]))
+            best_cost = min(best_cost, combined[j])
             continue
-        leftover = sorted(
-            (s for s in eligible_from_valid if s["date_time"] not in whole_block_dts),
-            key=lambda s: s["effective_price"],
+        window = _best_topup(
+            eligible_from_valid, whole_block_dts, remaining, min_slots_per_block, max_price, max_slots_per_block
         )
-        topped_up = set(whole_block_dts)
-        added_cost = 0.0
-        for s in leftover[:remaining]:
-            topped_up.add(s["date_time"])
-            added_cost += s["effective_price"]
-        candidates.append((topped_up, combined[j] + added_cost))
+        if window is None:
+            continue
+        cost = combined[j] + sum(s["effective_price"] for s in window)
+        candidates.append((whole_block_dts | {s["date_time"] for s in window}, cost))
+        best_cost = min(best_cost, cost)
+
+    if not candidates:
+        return []
 
     selected_dts, _ = min(candidates, key=lambda c: c[1])
     result = [s for s in eligible if s["date_time"] in selected_dts]
@@ -586,7 +705,16 @@ def _find_optimal_slots_optimal(
         for run in valid_runs
     ]
 
-    return _solve_with_per_run_costs(eligible, valid_runs, eligible_from_valid, per_run, required_slots, max_price)
+    return _solve_with_per_run_costs(
+        eligible,
+        valid_runs,
+        eligible_from_valid,
+        per_run,
+        required_slots,
+        max_price,
+        min_slots_per_block,
+        max_slots_per_block,
+    )
 
 
 def _find_optimal_slots_hybrid(
@@ -652,7 +780,16 @@ def _find_optimal_slots_hybrid(
         k_cap = max(candidate_sizes) if candidate_sizes else min_slots_per_block
         per_run.append(_min_cost_for_run(run, k_cap, min_slots_per_block, max_slots_per_block, max_price))
 
-    return _solve_with_per_run_costs(eligible, valid_runs, eligible_from_valid, per_run, required_slots, max_price)
+    return _solve_with_per_run_costs(
+        eligible,
+        valid_runs,
+        eligible_from_valid,
+        per_run,
+        required_slots,
+        max_price,
+        min_slots_per_block,
+        max_slots_per_block,
+    )
 
 
 def find_optimal_slots(
@@ -891,7 +1028,7 @@ def next_ready_by(now_dt: datetime, hour: int = 7, min_day_offset: int = 0) -> d
         # somewhere becomes 2am->3am), the result may be a local time that never
         # occurred. Round-tripping through UTC snaps it to the real local time
         # at that instant instead of silently keeping an invalid offset (#27).
-        candidate = candidate.astimezone(timezone.utc).astimezone(candidate.tzinfo)
+        candidate = candidate.astimezone(UTC).astimezone(candidate.tzinfo)
     if candidate <= now_dt:
         candidate += timedelta(days=1)
     return candidate
