@@ -65,6 +65,13 @@ custom_components/wholesale_ev_schedule/
   Related: with a `max_price` and no `max_block_hours`, `_min_cost_for_run` tracks
   real block length (bounded by the requested slot count) instead of collapsing
   all "free" lengths into one state, because the cap is a whole-block average.
+- **`calculating` is a display-only state (`STATE_CALCULATING`).** `_async_recalculate`
+  (`coordinator.py`) wraps every user-edit refresh: it sets a flag, pushes listeners
+  so the state sensor reads `calculating`, then refreshes. The flag is cleared in a
+  `finally` inside `_async_update_data`, not after `async_refresh` returns, because
+  the coordinator notifies listeners at the end of `async_refresh`. It lives on the
+  sensor (`native_value`), not in `data["state"]`, so `scheduler.determine_state`
+  stays pure and `charging_desired` is untouched while it's showing.
 - **There's no live `max_block_hours` entity** — it was removed as an
   unnecessary second knob (it only ever capped window *selection* size
   without guaranteeing an actual rest period; genuine multi-block scheduling
@@ -185,6 +192,7 @@ All tests run inside Docker (`public.ecr.aws/docker/library/python:trixie`):
 What each test file covers:
 - `tests/test_scheduler.py` — unit tests for the pure scheduling algorithm, including max_block_hours splitting (the pure capability), next_ready_by (including a DST spring-forward transition), the price-summary diagnostics, and the "optimal"/"hybrid" algorithms against every greedy scenario plus issue #55's reported case
 - `tests/test_block_and_price_constraints.py` — min-block and max_price as guarantees on the returned schedule, across all three algorithms, plus seeded randomised invariants.  Guards the top-up step: remainders must be one contiguous, under-`max_price` window, never scattered single slots
+- `tests/test_calculating_state.py` — the state sensor shows `calculating` mid-recompute for every user-edit path (not periodic refreshes), never flips `charging_desired`, and always clears, even if the refresh fails
 - `tests/test_optimization_algorithm.py` — the optimization_algorithm select entity: default value, persistence via the select entity, survival across restarts, an invalid stored value degrading to greedy, reset restoring the default
 - `tests/test_integration_smoke.py` — full config/options flow, entity registration, idle vs error state on a fresh setup given the new defaults
 - `tests/test_providers.py` — custom rates/forecast provider branches, "no forecast" branch, blank custom attribute/key fields rejected, re-enabling forecast after "none"

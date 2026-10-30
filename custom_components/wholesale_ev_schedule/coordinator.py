@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import logging
 import math
 from datetime import datetime, timedelta
@@ -143,6 +144,7 @@ class WholesaleEvScheduleCoordinator(DataUpdateCoordinator[dict]):
             update_interval=timedelta(minutes=update_minutes),
         )
         self.entry = entry
+        self._calculating = False
         self._store = Store(hass, STORAGE_VERSION, f"{DOMAIN}_{entry.entry_id}_state")
 
         # Setup-time defaults (see class docstring) -- fall back to the
@@ -385,7 +387,7 @@ class WholesaleEvScheduleCoordinator(DataUpdateCoordinator[dict]):
     async def async_set_ready_by(self, value: datetime) -> None:
         self.ready_by = dt_util.as_local(value)
         await self._async_save_stored_state()
-        await self.async_refresh()
+        await self._async_recalculate()
 
     def _reject_non_finite(self, value: float, field_name: str) -> None:
         """Raise if `value` isn't finite. HA's own number-entity min/max guard
@@ -404,7 +406,7 @@ class WholesaleEvScheduleCoordinator(DataUpdateCoordinator[dict]):
         # previous required_hours was don't carry over and offset it.
         self._delivered_hours = 0.0
         await self._async_save_stored_state()
-        await self.async_refresh()
+        await self._async_recalculate()
 
     async def async_set_opportunistic_enabled(self, value: bool) -> None:
         """Live pause/resume for opportunistic charging -- unlike the setup-time
@@ -415,7 +417,7 @@ class WholesaleEvScheduleCoordinator(DataUpdateCoordinator[dict]):
         instantly resumes with everything intact."""
         self.opportunistic_enabled = value
         await self._async_save_stored_state()
-        await self.async_refresh()
+        await self._async_recalculate()
 
     async def async_set_opportunistic_target_hours(self, value: float) -> None:
         self._reject_non_finite(value, "opportunistic_target_hours")
@@ -424,13 +426,13 @@ class WholesaleEvScheduleCoordinator(DataUpdateCoordinator[dict]):
         # fresh, unoffset by whatever was delivered under the previous one.
         self._delivered_opportunistic_hours = 0.0
         await self._async_save_stored_state()
-        await self.async_refresh()
+        await self._async_recalculate()
 
     async def async_set_opportunistic_max_price(self, value: float) -> None:
         self._reject_non_finite(value, "opportunistic_max_price")
         self.opportunistic_max_price = value
         await self._async_save_stored_state()
-        await self.async_refresh()
+        await self._async_recalculate()
 
     async def async_set_opportunistic_ready_by(self, value: datetime) -> None:
         """Live-editable, but only as a one-cycle override: the next time the
@@ -442,51 +444,51 @@ class WholesaleEvScheduleCoordinator(DataUpdateCoordinator[dict]):
         current cycle, not indefinitely."""
         self.opportunistic_ready_by = dt_util.as_local(value)
         await self._async_save_stored_state()
-        await self.async_refresh()
+        await self._async_recalculate()
 
     async def async_set_gamble_tolerance(self, value: float) -> None:
         self._reject_non_finite(value, "gamble_tolerance")
         self.gamble_tolerance = value
         await self._async_save_stored_state()
-        await self.async_refresh()
+        await self._async_recalculate()
 
     async def async_set_min_block_hours(self, value: float) -> None:
         self._reject_non_finite(value, "min_block_hours")
         self.min_block_hours = value
         await self._async_save_stored_state()
-        await self.async_refresh()
+        await self._async_recalculate()
 
     async def async_set_max_price(self, value: float) -> None:
         self._reject_non_finite(value, "max_price")
         self.max_price = value
         await self._async_save_stored_state()
-        await self.async_refresh()
+        await self._async_recalculate()
 
     async def async_set_assumed_charge_kwh(self, value: float) -> None:
         self._reject_non_finite(value, "assumed_charge_kwh")
         self.assumed_charge_kwh = value
         await self._async_save_stored_state()
-        await self.async_refresh()
+        await self._async_recalculate()
 
     async def async_set_charge_override(self, value: str) -> None:
         self.charge_override = value
         await self._async_save_stored_state()
-        await self.async_refresh()
+        await self._async_recalculate()
 
     async def async_set_optimization_algorithm(self, value: str) -> None:
         self.optimization_algorithm = value
         await self._async_save_stored_state()
-        await self.async_refresh()
+        await self._async_recalculate()
 
     async def async_start_boost(self, duration_hours: float) -> None:
         self._boost_end = dt_util.now() + timedelta(hours=duration_hours)
         await self._async_save_stored_state()
-        await self.async_refresh()
+        await self._async_recalculate()
 
     async def async_cancel_boost(self) -> None:
         self._boost_end = None
         await self._async_save_stored_state()
-        await self.async_refresh()
+        await self._async_recalculate()
 
     async def async_stop(self) -> None:
         """Kill/end the current session: cancel today's schedule and any
@@ -503,7 +505,7 @@ class WholesaleEvScheduleCoordinator(DataUpdateCoordinator[dict]):
         self.opportunistic_target_hours = 0.0
         self._delivered_opportunistic_hours = 0.0
         await self._async_save_stored_state()
-        await self.async_refresh()
+        await self._async_recalculate()
 
     async def async_reset(self) -> None:
         """Put everything back to the configured setup-time defaults (see
@@ -545,7 +547,7 @@ class WholesaleEvScheduleCoordinator(DataUpdateCoordinator[dict]):
         self._boost_end = None
         self._delivered_hours = 0.0
         await self._async_save_stored_state()
-        await self.async_refresh()
+        await self._async_recalculate()
 
     @property
     def _options(self) -> dict:
@@ -787,7 +789,39 @@ class WholesaleEvScheduleCoordinator(DataUpdateCoordinator[dict]):
             s["tier"] = SESSION_TIER_OPPORTUNISTIC
         return opportunistic_sessions
 
+    async def _async_recalculate(self) -> None:
+        """Refresh in response to a user/automation edit, surfacing STATE_CALCULATING
+        on the state sensor for the duration.
+
+        The scheduler runs synchronously on the event loop, so without this a
+        changed setting looks like nothing happened until the new schedule lands
+        (noticeably long with the optimal algorithm on a long price horizon). The
+        flag is cleared inside _async_update_data (always, via finally) rather than
+        here, because DataUpdateCoordinator notifies listeners at the end of
+        async_refresh -- clearing it afterwards would publish one more update
+        still saying "calculating". The `sleep(0)` yields once so the state change
+        is actually flushed to clients before the blocking computation starts.
+        Only edits go through here: the periodic/minute-tick refreshes stay silent.
+        """
+        self._calculating = True
+        self.async_update_listeners()
+        await asyncio.sleep(0)
+        try:
+            await self.async_refresh()
+        finally:
+            self._calculating = False
+
+    @property
+    def calculating(self) -> bool:
+        return self._calculating
+
     async def _async_update_data(self) -> dict:
+        try:
+            return await self._async_compute_data()
+        finally:
+            self._calculating = False
+
+    async def _async_compute_data(self) -> dict:
         now_dt = dt_util.now()
         # Collected unconditionally (even when idle/erroring on the schedule
         # itself) so the market-data diagnostics stay populated regardless of
