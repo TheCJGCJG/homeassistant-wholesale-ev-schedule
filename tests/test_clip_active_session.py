@@ -230,7 +230,7 @@ def test_a_session_crossing_the_deadline_keeps_only_the_whole_slots_that_finish_
     assert datetime.fromisoformat(kept["end"]) == START + timedelta(hours=4.5)
 
 
-def test_no_deadline_means_only_the_allowance_applies():
+def test_fitting_with_no_deadline_means_only_the_allowance_applies():
     kept = fit_future_sessions([_block(2), _block(4)], allowed_slots=3, deadline_dt=None)
     assert sum(s["duration_hours"] for s in kept) == 1.5
 
