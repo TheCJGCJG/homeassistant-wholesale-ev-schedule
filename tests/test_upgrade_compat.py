@@ -1,7 +1,8 @@
-"""An install upgrading from the released 1.2.0: its config entry and its stored-state file, exactly as
-that version wrote them, must load, carry on mid-charge without a blip, and not need migration.
+"""An install upgrading from the previous release (1.2.0 and 1.3.0 share a storage shape): its config
+entry and its stored-state file, exactly as that version wrote them, must load, carry on mid-charge
+without a blip, and not need migration.
 
-The stored payloads below are the 1.2.0 shape verbatim (see its _async_save_stored_state): no
+The stored payloads below are that shape verbatim (see its _async_save_stored_state): no
 `short_blocks_used`, sessions without `estimated`, local-offset timestamps."""
 
 from datetime import UTC, datetime, timedelta
