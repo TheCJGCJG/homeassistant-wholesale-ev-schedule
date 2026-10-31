@@ -25,7 +25,11 @@ def to_utc(dt: datetime) -> datetime:
     such thing. Returning the very same object when it is already UTC keeps the common case
     free.
     """
-    return dt.astimezone(UTC) if dt.tzinfo is not None else dt
+    tzinfo = dt.tzinfo
+    # Hot path: the coordinator already hands over UTC, and this runs thousands of times a refresh.
+    if tzinfo is UTC or tzinfo is None:
+        return dt
+    return dt.astimezone(UTC)
 
 
 # Mirrors const.py's OPTIMIZATION_ALGORITHM_* values, duplicated as plain string
@@ -124,8 +128,9 @@ def slot_base_credibility(slot: dict) -> float:
 def compute_effective_price(
     raw_price: float, tier: str, gamble_tolerance: float, base_credibility: float | None = None
 ) -> float:
-    """Risk-adjusted price used for slot ranking. Low gamble_tolerance inflates predicted
-    prices, favouring known actual rates; at 100 all prices are taken at face value.
+    """Risk-adjusted price used for slot ranking. Low gamble_tolerance makes predicted
+    prices less attractive (inflating positive ones, shrinking negative ones toward zero),
+    favouring known actual rates; at 100 all prices are taken at face value.
 
     gamble_tolerance is clamped to [0, 100] -- its only intended domain. Above
     100, eff_cred exceeds 1.0 for predicted tiers, making a predicted price
@@ -140,6 +145,12 @@ def compute_effective_price(
     gamble_tolerance = max(0.0, min(100.0, gamble_tolerance))
     base_cred = _resolve_base_credibility(tier, base_credibility)
     eff_cred = base_cred + (1.0 - base_cred) * (gamble_tolerance / 100.0)
+    if raw_price < 0:
+        # Negative prices ("plunge pricing") flip the direction of the penalty: dividing -5p by
+        # 0.9 gives -5.6p, making a doubtful price look MORE attractive than a real -5p one.
+        # Shrinking it toward zero instead keeps "doubtful is never better than real" true for
+        # every sign, and meets the positive branch continuously at zero.
+        return raw_price * eff_cred
     return raw_price / eff_cred
 
 
@@ -1002,6 +1013,44 @@ def prune_and_classify(sessions: list[dict], now_dt: datetime) -> tuple[dict | N
         elif end > now_dt:
             future.append(s)
     return active, future
+
+
+def clip_active_session(
+    session: dict, now_dt: datetime, allowed_slots: int, deadline_dt: datetime | None
+) -> tuple[dict | None, float]:
+    """Cut an in-progress session down to what its tier still allows: at most `allowed_slots`
+    half-hours in total and nothing past `deadline_dt`. Returns (session_to_keep, hours_to_credit).
+
+    A session is planned once and then carried forward untouched while it runs, so without this
+    a block outlives anything the user changes after it started -- lowering the requirement,
+    pausing a tier, pulling the deadline earlier -- and the charger just keeps going until the
+    block happens to end.
+
+    If the limit is still ahead the session is shortened (staying on the half-hour grid when the
+    allowance is what limits it). If it has been reached already the session stops *now*: it is
+    dropped and the whole slots that actually ran are returned for the caller to credit as
+    delivered, which an ended session would otherwise have contributed on its own. The input is
+    never mutated.
+    """
+    start, end = _session_span(session)
+    now = to_utc(now_dt)
+    limit = min(end, start + timedelta(minutes=30 * max(0, allowed_slots)))
+    if deadline_dt is not None:
+        limit = min(limit, to_utc(deadline_dt))
+    if limit >= end:
+        return session, 0.0
+    if limit <= now:
+        # Whole slots only: the delivered-hours accounting rounds a part-slot UP to a whole one,
+        # so crediting the exact elapsed time would count time that never ran. Under-crediting
+        # at worst re-plans one extra slot; over-crediting leaves the car short.
+        whole_slots = math.floor(round((now - start).total_seconds() / 1800, 6))
+        return None, max(0, whole_slots) / 2
+
+    clipped = dict(session)
+    tzinfo = parse_dt(session["end"]).tzinfo
+    clipped["end"] = (limit.astimezone(tzinfo) if tzinfo is not None else limit).isoformat()
+    clipped["duration_hours"] = (limit - start).total_seconds() / 3600
+    return clipped, 0.0
 
 
 def compute_hours_remaining(future_sessions: list[dict], active_session: dict | None, now_dt: datetime) -> float:

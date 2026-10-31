@@ -102,6 +102,7 @@ from .scheduler import (
     TIER_ACTUAL,
     add_local_days,
     assign_credibilities,
+    clip_active_session,
     compute_hours_remaining,
     deduplicate_and_sort_prices,
     determine_state,
@@ -758,9 +759,42 @@ class WholesaleEvScheduleCoordinator(DataUpdateCoordinator[dict]):
                 self._delivered_hours += duration
         self._stored_sessions = still_pending
 
+    def _opportunistic_allowance_slots(self) -> int:
+        """Half-hours of opportunistic charging still wanted: none while it's switched off, has
+        no target, or has no deadline yet; otherwise the target less what has been delivered."""
+        if not self.opportunistic_enabled or self.opportunistic_target_hours <= 0 or not self.opportunistic_ready_by:
+            return 0
+        wanted = max(1, math.ceil(self.opportunistic_target_hours * 2))
+        return max(0, wanted - math.ceil(round(self._delivered_opportunistic_hours * 2, 6)))
+
+    def _clip_active_session(self, active_session: dict | None, now_dt: datetime) -> dict | None:
+        """Stop an in-progress block from outliving what its tier still wants.
+
+        A session is planned once and carried forward untouched while it runs, so lowering the
+        requirement, pausing opportunistic charging, or pulling a deadline earlier would
+        otherwise change nothing until the block happened to end (see
+        scheduler.clip_active_session). A session stopped here is credited with the hours it
+        actually ran, exactly as if it had ended on its own.
+        """
+        if active_session is None:
+            return None
+        if active_session.get("tier", SESSION_TIER_REQUIRED) == SESSION_TIER_OPPORTUNISTIC:
+            allowed, deadline = self._opportunistic_allowance_slots(), self.opportunistic_ready_by
+        else:
+            wanted = max(1, math.ceil(self.required_hours * 2))
+            allowed, deadline = max(0, wanted - math.ceil(round(self._delivered_hours * 2, 6))), self.ready_by
+        clipped, credit = clip_active_session(active_session, now_dt, allowed, deadline)
+        if credit:
+            if active_session.get("tier", SESSION_TIER_REQUIRED) == SESSION_TIER_OPPORTUNISTIC:
+                self._delivered_opportunistic_hours += credit
+            else:
+                self._delivered_hours += credit
+        return clipped
+
     def _compute_sessions(self, all_prices: list[dict], now_dt: datetime) -> list[dict]:
         self._accrue_delivered_hours(now_dt)
         active_session, _ = prune_and_classify(self._stored_sessions, now_dt)
+        active_session = self._clip_active_session(active_session, now_dt)
         active_tier = active_session.get("tier", SESSION_TIER_REQUIRED) if active_session else None
 
         required_slots = max(1, math.ceil(self.required_hours * 2))
@@ -1162,7 +1196,9 @@ class WholesaleEvScheduleCoordinator(DataUpdateCoordinator[dict]):
                     "sessions": [],
                     "active_slot": None,
                     "next_slot": None,
-                    "hours_remaining": self.required_hours,
+                    # What is still outstanding -- not the full requirement again when part of
+                    # it has already been delivered.
+                    "hours_remaining": max(0.0, self.required_hours - self._delivered_hours),
                     "error_reason": reason,
                     "calculated_at": now_dt.isoformat(),
                     **self._opportunistic_diagnostics(sessions, now_dt),

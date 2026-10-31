@@ -102,7 +102,9 @@ class PriceWorld:
         """Long-range forecast: issued every 6h, near-exact for already-published slots,
         drifting by up to ~12p at long range."""
         issued = now.astimezone(UTC).replace(hour=now.astimezone(UTC).hour // 6 * 6, minute=0, second=0, microsecond=0)
-        horizon_h = max(0.0, (slot - now).total_seconds() / 3600)
+        # Relative to the issue time, not "now": a forecast is a fixed document until the next
+        # issue, so republishing mid-block (e.g. after a restart) must show identical numbers.
+        horizon_h = max(0.0, (slot - issued).total_seconds() / 3600)
         if slot < published_through(now):
             return self.true_price(slot)
         return round(max(0.5, self.true_price(slot) + self._error(slot, issued, min(12.0, 1.0 + horizon_h * 0.12))), 2)
@@ -312,6 +314,18 @@ class Sim:
         self.setting_edits = False
         return tick
 
+    async def act(self, coro) -> Tick:
+        """Await a deliberate user action (a setter, a button) and record the state right after
+        it, at the same instant. Relaxes the "plan is current" invariants for this tick and the
+        next, since an edit can legitimately leave an in-progress session untouched."""
+        self.setting_edits = True
+        await coro
+        await self.hass.async_block_till_done()
+        tick = self._observe()
+        self.timeline.append(tick)
+        check_invariants(self, tick)
+        return tick
+
     async def run(self, minutes: int, *, step: int | None = None, until=None) -> None:
         step = step or self.step_minutes
         elapsed = 0
@@ -358,10 +372,44 @@ class Sim:
             charge_override=c.charge_override,
         )
 
+    def snapshot(self) -> dict:
+        """Everything a user can observe or a restart must preserve, as plain comparable data."""
+        c = self.coordinator
+        return {
+            "state": c.data["state"],
+            "desired": c.data["desired"],
+            "sessions": json.loads(json.dumps(c.data["sessions"])),
+            "hours_remaining": c.data["hours_remaining"],
+            "error_reason": c.data["error_reason"],
+            "boost_end": c.data["boost_end"],
+            "ready_by": c.ready_by.isoformat(),
+            "required_hours": c.required_hours,
+            "gamble_tolerance": c.gamble_tolerance,
+            "min_block_hours": c.min_block_hours,
+            "max_price": c.max_price,
+            "assumed_charge_kwh": c.assumed_charge_kwh,
+            "charge_override": c.charge_override,
+            "optimization_algorithm": c.optimization_algorithm,
+            "delivered_hours": c._delivered_hours,
+            "opportunistic_enabled": c.opportunistic_enabled,
+            "opportunistic_target_hours": c.opportunistic_target_hours,
+            "opportunistic_max_price": c.opportunistic_max_price,
+            "opportunistic_ready_by": c.opportunistic_ready_by.isoformat() if c.opportunistic_ready_by else None,
+            "delivered_opportunistic_hours": c._delivered_opportunistic_hours,
+        }
+
     # -- outcome helpers --------------------------------------------------------------------
 
     def charged_hours(self, ready_by: datetime) -> float:
         return self.charged_minutes.get(ready_by.isoformat(), 0) / 60.0
+
+    def on_minutes(self, start: datetime, end: datetime) -> int:
+        """Minutes the charger was on within [start, end], measured over the recorded ticks."""
+        total = 0
+        for prev, cur in zip(self.timeline, self.timeline[1:], strict=False):
+            if prev.desired and prev.at >= start and cur.at <= end:
+                total += int((cur.at - prev.at).total_seconds() // 60)
+        return total
 
     def desired_series(self) -> list[tuple[datetime, bool]]:
         return [(t.at, t.desired) for t in self.timeline]
@@ -438,7 +486,10 @@ def check_invariants(sim: Sim, tick: Tick) -> None:
         if sess.get("tier", "required") == "required"
     )
     if tick.required_hours > 0 and tick.state not in ("boosting",):
-        assert required_hours_scheduled + tick.delivered_hours <= tick.required_hours + 0.5 + 1e-6, (
+        # (If the user lowered the target below what was already delivered, nothing more may be
+        # scheduled: the budget is what is left, never negative.)
+        budget = max(0.0, tick.required_hours - tick.delivered_hours)
+        assert required_hours_scheduled <= budget + 0.5 + 1e-6, (
             f"{ctx} over-committed: {required_hours_scheduled}h scheduled + {tick.delivered_hours}h delivered"
             f" > {tick.required_hours}h required"
         )
@@ -446,8 +497,9 @@ def check_invariants(sim: Sim, tick: Tick) -> None:
     if tick.state == "idle":
         assert tick.required_hours <= 0 or c.required_hours <= 0, f"{ctx} idle with hours required"
 
-    # future required sessions respect the deadline and the price cap
-    if not sim.setting_edits:
+    # future required sessions respect the deadline and the price cap -- only in states that
+    # recompute the plan every cycle (boosting and error replay the stored plan unchanged)
+    if not sim.setting_edits and tick.state in ("scheduled", "charging", "complete"):
         for start, end, sess in intervals:
             if sess.get("tier", "required") != "required" or start <= now:
                 continue
