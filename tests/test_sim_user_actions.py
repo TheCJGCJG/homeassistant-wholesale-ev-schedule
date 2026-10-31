@@ -10,7 +10,7 @@ from .sim import UTC, PriceWorld, Sim
 
 START = "2026-03-02 12:00:00+00:00"
 # Overnight trough 00:00-05:30Z; ready_by 07:00Z. Tonight's rates are known from 15:00Z.
-WORLD = dict(seed=1)
+WORLD = {"seed": 1}
 
 
 async def _sim(hass, freezer, **kwargs):
