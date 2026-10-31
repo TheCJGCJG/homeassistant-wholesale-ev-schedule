@@ -141,6 +141,19 @@ OPTIMIZATION_ALGORITHM_OPTIMAL = "optimal"
 OPTIMIZATION_ALGORITHM_HYBRID = "hybrid"
 DEFAULT_OPTIMIZATION_ALGORITHM = OPTIMIZATION_ALGORITHM_GREEDY
 
+# Legal ranges of the live inputs. The number entities enforce them, and anything loaded from
+# storage is clamped to them, so one definition keeps the two from drifting apart.
+RANGE_HOURS = (0.0, 24.0)
+RANGE_PERCENT = (0.0, 100.0)
+RANGE_PRICE = (0.0, 200.0)
+RANGE_KWH = (0.0, 150.0)
+MAX_BOOST_HOURS = 8.0
+# An upper bound for the delivered-hours counters (a requirement can never exceed RANGE_HOURS[1]
+# per cycle); only there so a corrupt stored figure cannot sit in the system indefinitely.
+MAX_DELIVERED_HOURS = 10_000.0
+# The longest a single stored session can sensibly be.
+MAX_SESSION_HOURS = 48.0
+
 DEFAULT_GAMBLE_TOLERANCE = 50.0
 # The only block-length knob — a floor on how short a single charging block
 # may be, to avoid rapidly cycling the charger. 0 means no minimum at all.

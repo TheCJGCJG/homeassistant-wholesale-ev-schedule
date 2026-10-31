@@ -951,6 +951,13 @@ def _session_span(session: dict) -> tuple[datetime, datetime]:
     return to_utc(parse_dt(session["start"])), to_utc(parse_dt(session["end"]))
 
 
+def session_slots(session: dict) -> int:
+    """Half-hours a stored session spans, derived from its start/end -- never from its stored
+    `duration_hours`, which is only a display field and can drift or arrive corrupt."""
+    start, end = _session_span(session)
+    return max(0, math.ceil(round((end - start).total_seconds() / 1800, 6)))
+
+
 def prune_and_classify(sessions: list[dict], now_dt: datetime) -> tuple[dict | None, list[dict]]:
     """Split sessions into (active_session | None, [future_sessions]). Expired
     sessions (end <= now_dt) are silently dropped.
