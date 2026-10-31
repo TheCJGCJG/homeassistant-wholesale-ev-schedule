@@ -14,6 +14,20 @@ from datetime import UTC, datetime, timedelta
 
 _LOGGER = logging.getLogger(__name__)
 
+
+def to_utc(dt: datetime) -> datetime:
+    """`dt` as an absolute UTC instant (naive datetimes are returned unchanged).
+
+    Every comparison, dictionary key and piece of arithmetic on a slot's time goes through
+    this. Python compares and subtracts two aware datetimes that share a tzinfo by their
+    *wall clock*, ignoring the UTC offset, and treats the repeated autumn hour as one key --
+    so local-time slots silently lose or mis-measure time across a DST change. UTC has no
+    such thing. Returning the very same object when it is already UTC keeps the common case
+    free.
+    """
+    return dt.astimezone(UTC) if dt.tzinfo is not None else dt
+
+
 # Mirrors const.py's OPTIMIZATION_ALGORITHM_* values, duplicated as plain string
 # literals rather than imported -- const.py pulls in homeassistant.const, which would
 # break this module's deliberate no-HA-dependency contract (see module docstring).
@@ -76,7 +90,7 @@ def get_source_tier(source: str, slot_dt: datetime, now_dt: datetime) -> str:
         # Deliberately horizon-independent: a short-range source exists because it is
         # trusted over the long-range forecast at the distances it covers.
         return TIER_SHORT_RANGE
-    hours_ahead = (slot_dt - now_dt).total_seconds() / 3600
+    hours_ahead = (to_utc(slot_dt) - to_utc(now_dt)).total_seconds() / 3600
     if hours_ahead <= 24:
         return TIER_PREDICTED_0_24
     if hours_ahead <= 48:
@@ -136,6 +150,7 @@ def assign_credibilities(slots: list[dict], now_dt: datetime, gamble_tolerance: 
         tier = get_source_tier(slot["source"], slot["date_time"], now_dt)
         eff_price = compute_effective_price(slot["raw_price"], tier, gamble_tolerance, slot.get("base_credibility"))
         entry = dict(slot)
+        entry["date_time"] = to_utc(slot["date_time"])
         entry["tier"] = tier
         entry["effective_price"] = eff_price
         result.append(entry)
@@ -149,14 +164,29 @@ def build_contiguous_runs(slots: list[dict]) -> list[list[dict]]:
     runs = []
     current_run = [slots[0]]
     for slot in slots[1:]:
-        expected = current_run[-1]["date_time"] + timedelta(minutes=30)
-        if slot["date_time"] == expected:
+        expected = to_utc(current_run[-1]["date_time"]) + timedelta(minutes=30)
+        if to_utc(slot["date_time"]) == expected:
             current_run.append(slot)
         else:
             runs.append(current_run)
             current_run = [slot]
     runs.append(current_run)
     return runs
+
+
+def _eligible_slots(candidate_slots: list[dict], ready_by_dt: datetime) -> list[dict]:
+    """The candidates that finish by ready_by, sorted by time, with every `date_time` as a UTC
+    instant (see to_utc). Shared by all three algorithms so the deadline rule and the
+    DST-safe normalisation live in exactly one place. A slot that is already UTC is passed
+    through as the same object rather than copied."""
+    deadline = to_utc(ready_by_dt)
+    eligible = []
+    for slot in candidate_slots:
+        start = to_utc(slot["date_time"])
+        if start + timedelta(minutes=30) <= deadline:
+            eligible.append(slot if start is slot["date_time"] else {**slot, "date_time": start})
+    eligible.sort(key=lambda s: s["date_time"])
+    return eligible
 
 
 def _best_topup(
@@ -293,8 +323,7 @@ def _find_optimal_slots_greedy(
         # requirement above.
         max_slots_per_block = max(max_slots_per_block, min_slots_per_block)
 
-    eligible = [s for s in candidate_slots if s["date_time"] + timedelta(minutes=30) <= ready_by_dt]
-    eligible.sort(key=lambda s: s["date_time"])
+    eligible = _eligible_slots(candidate_slots, ready_by_dt)
 
     all_runs = build_contiguous_runs(eligible)
     valid_runs = [r for r in all_runs if len(r) >= min_slots_per_block]
@@ -752,8 +781,7 @@ def _find_optimal_slots_optimal(
         required_slots, min_block_hours, max_block_hours
     )
 
-    eligible = [s for s in candidate_slots if s["date_time"] + timedelta(minutes=30) <= ready_by_dt]
-    eligible.sort(key=lambda s: s["date_time"])
+    eligible = _eligible_slots(candidate_slots, ready_by_dt)
 
     all_runs = build_contiguous_runs(eligible)
     valid_runs = [r for r in all_runs if len(r) >= min_slots_per_block]
@@ -808,8 +836,7 @@ def _find_optimal_slots_hybrid(
         required_slots, min_block_hours, max_block_hours
     )
 
-    eligible = [s for s in candidate_slots if s["date_time"] + timedelta(minutes=30) <= ready_by_dt]
-    eligible.sort(key=lambda s: s["date_time"])
+    eligible = _eligible_slots(candidate_slots, ready_by_dt)
 
     all_runs = build_contiguous_runs(eligible)
     valid_runs = [r for r in all_runs if len(r) >= min_slots_per_block]
@@ -909,12 +936,12 @@ def slots_to_sessions(selected_slots: list[dict]) -> list[dict]:
     """
     if not selected_slots:
         return []
-    sorted_slots = sorted(selected_slots, key=lambda s: s["date_time"])
+    sorted_slots = sorted(selected_slots, key=lambda s: to_utc(s["date_time"]))
     runs = build_contiguous_runs(sorted_slots)
     sessions = []
     for run in runs:
-        start = run[0]["date_time"]
-        end = run[-1]["date_time"] + timedelta(minutes=30)
+        start = to_utc(run[0]["date_time"])
+        end = to_utc(run[-1]["date_time"]) + timedelta(minutes=30)
         avg_price = sum(s["raw_price"] for s in run) / len(run)
         avg_cred = sum(slot_base_credibility(s) for s in run) / len(run)
         sessions.append(
@@ -945,6 +972,11 @@ def parse_dt(value) -> datetime:
     return parse_iso_str(str(value))
 
 
+def _session_span(session: dict) -> tuple[datetime, datetime]:
+    """A stored session's (start, end) as UTC instants, however they were persisted."""
+    return to_utc(parse_dt(session["start"])), to_utc(parse_dt(session["end"]))
+
+
 def prune_and_classify(sessions: list[dict], now_dt: datetime) -> tuple[dict | None, list[dict]]:
     """Split sessions into (active_session | None, [future_sessions]). Expired
     sessions (end <= now_dt) are silently dropped.
@@ -959,9 +991,9 @@ def prune_and_classify(sessions: list[dict], now_dt: datetime) -> tuple[dict | N
     """
     active = None
     future = []
+    now_dt = to_utc(now_dt)
     for s in sessions:
-        start = parse_dt(s["start"])
-        end = parse_dt(s["end"])
+        start, end = _session_span(s)
         if start <= now_dt < end:
             if active is not None:
                 _LOGGER.warning("Discarding unexpected overlapping active session %r (keeping %r)", s, active)
@@ -984,11 +1016,10 @@ def compute_hours_remaining(future_sessions: list[dict], active_session: dict | 
     """
     total = 0.0
     if active_session:
-        end = parse_dt(active_session["end"])
-        total += max(0.0, (end - now_dt).total_seconds() / 3600)
+        _, end = _session_span(active_session)
+        total += max(0.0, (end - to_utc(now_dt)).total_seconds() / 3600)
     for s in future_sessions:
-        start = parse_dt(s["start"])
-        end = parse_dt(s["end"])
+        start, end = _session_span(s)
         total += (end - start).total_seconds() / 3600
     return total
 
@@ -1005,15 +1036,15 @@ def deduplicate_and_sort_prices(all_prices: list[dict], now_dt: datetime) -> lis
     sorts the rest chronologically."""
     prices_by_dt: dict = {}
     for p in all_prices:
-        dt = p["date_time"]
+        dt = to_utc(p["date_time"])
         existing = prices_by_dt.get(dt)
         if existing is None or _source_rank(p["source"]) < _source_rank(existing["source"]):
-            prices_by_dt[dt] = p
+            prices_by_dt[dt] = p if dt is p["date_time"] else {**p, "date_time": dt}
 
     result = []
     for dt in sorted(prices_by_dt.keys()):
         p = prices_by_dt[dt]
-        if dt + timedelta(minutes=30) > now_dt:
+        if dt + timedelta(minutes=30) > to_utc(now_dt):
             result.append(p)
     return result
 
@@ -1035,8 +1066,9 @@ def summarize_prices(slots: list[dict], now_dt: datetime, window_hours: float = 
         }
 
     prices = [s["raw_price"] for s in slots]
-    window_end = now_dt + timedelta(hours=window_hours)
-    window_prices = [s["raw_price"] for s in slots if now_dt <= s["date_time"] < window_end]
+    window_start = to_utc(now_dt)
+    window_end = window_start + timedelta(hours=window_hours)
+    window_prices = [s["raw_price"] for s in slots if window_start <= to_utc(s["date_time"]) < window_end]
 
     source_counts: dict[str, int] = {}
     for s in slots:
@@ -1094,14 +1126,29 @@ def next_ready_by(now_dt: datetime, hour: int = 7, min_day_offset: int = 0) -> d
     etc.), matching the "Next day / Next day+1/+2/+3" options configurable
     at setup time.
     """
-    candidate = now_dt.replace(hour=hour, minute=0, second=0, microsecond=0) + timedelta(days=min_day_offset)
-    if candidate.tzinfo is not None:
-        # `replace()` does naive wall-clock arithmetic -- on a DST transition day
-        # where `hour` falls in the skipped "spring forward" gap (e.g. 1am->2am
-        # somewhere becomes 2am->3am), the result may be a local time that never
-        # occurred. Round-tripping through UTC snaps it to the real local time
-        # at that instant instead of silently keeping an invalid offset (#27).
-        candidate = candidate.astimezone(UTC).astimezone(candidate.tzinfo)
-    if candidate <= now_dt:
-        candidate += timedelta(days=1)
+    candidate = _snap_to_real_time(
+        now_dt.replace(hour=hour, minute=0, second=0, microsecond=0) + timedelta(days=min_day_offset)
+    )
+    if to_utc(candidate) <= to_utc(now_dt):
+        candidate = _snap_to_real_time(candidate + timedelta(days=1))
     return candidate
+
+
+def _snap_to_real_time(dt: datetime) -> datetime:
+    """`dt` as a local time that really occurred, still in its own timezone.
+
+    Wall-clock arithmetic (`replace()`, adding days) can land on a local time that never
+    happened -- on a "spring forward" day where `hour` falls in the skipped gap (e.g.
+    1am->2am somewhere becomes 2am->3am). Round-tripping through UTC snaps it to the real
+    local time at that instant instead of silently keeping an invalid offset (#27).
+    """
+    if dt.tzinfo is None:
+        return dt
+    return dt.astimezone(UTC).astimezone(dt.tzinfo)
+
+
+def add_local_days(dt: datetime, days: int) -> datetime:
+    """`dt` moved `days` calendar days on the wall clock, so 07:00 stays 07:00 across a DST
+    change (rather than drifting by an hour, as adding 24h*days would), snapped to a real
+    local time if that wall time doesn't exist."""
+    return _snap_to_real_time(dt + timedelta(days=days))

@@ -100,6 +100,7 @@ from .scheduler import (
     SOURCE_SHORT_RANGE,
     SOURCE_SHORT_RANGE_FINAL,
     TIER_ACTUAL,
+    add_local_days,
     assign_credibilities,
     compute_hours_remaining,
     deduplicate_and_sort_prices,
@@ -110,6 +111,7 @@ from .scheduler import (
     prune_and_classify,
     slots_to_sessions,
     summarize_prices,
+    to_utc,
 )
 
 _LOGGER = logging.getLogger(__name__)
@@ -318,7 +320,7 @@ class WholesaleEvScheduleCoordinator(DataUpdateCoordinator[dict]):
             # would be derived on the next required-ready_by rollover
             # (_async_update_data), rather than leaving it None until that
             # rollover actually happens, which could be hours or days away.
-            self.opportunistic_ready_by = self.ready_by + timedelta(days=self._default_opportunistic_offset_days)
+            self.opportunistic_ready_by = add_local_days(self.ready_by, self._default_opportunistic_offset_days)
         self._delivered_opportunistic_hours = self._parse_stored_float(
             data.get("delivered_opportunistic_hours"), 0.0, "delivered_opportunistic_hours"
         )
@@ -521,7 +523,8 @@ class WholesaleEvScheduleCoordinator(DataUpdateCoordinator[dict]):
         await self._async_recalculate()
 
     async def async_start_boost(self, duration_hours: float) -> None:
-        self._boost_end = dt_util.now() + timedelta(hours=duration_hours)
+        # Absolute arithmetic (UTC) so a boost spanning a DST change lasts the hours asked for.
+        self._boost_end = dt_util.as_local(dt_util.utcnow() + timedelta(hours=duration_hours))
         await self._async_save_stored_state()
         await self._async_recalculate()
 
@@ -581,7 +584,7 @@ class WholesaleEvScheduleCoordinator(DataUpdateCoordinator[dict]):
         self.optimization_algorithm = DEFAULT_OPTIMIZATION_ALGORITHM
         self.opportunistic_target_hours = self._default_opportunistic_target_hours
         self.opportunistic_max_price = self._default_opportunistic_max_price
-        self.opportunistic_ready_by = self.ready_by + timedelta(days=self._default_opportunistic_offset_days)
+        self.opportunistic_ready_by = add_local_days(self.ready_by, self._default_opportunistic_offset_days)
         self._delivered_opportunistic_hours = 0.0
         self._stored_sessions = []
         self._boost_end = None
@@ -667,7 +670,7 @@ class WholesaleEvScheduleCoordinator(DataUpdateCoordinator[dict]):
                 price_val = resolve_key(point, spec.price_key)
                 if time_val is None or price_val is None:
                     continue
-                slot_dt = dt_util.as_local(parse_dt(time_val))
+                slot_dt = dt_util.as_utc(parse_dt(time_val))
                 raw_price = float(price_val)
                 # float() accepts the strings "nan"/"inf" without error (unlike
                 # "N/A", which correctly raises below) -- treat as malformed the
@@ -737,15 +740,23 @@ class WholesaleEvScheduleCoordinator(DataUpdateCoordinator[dict]):
         from scratch, even though the requirement was already met
         (hours_remaining bouncing back up after completion).
         """
+        # Consuming what is counted (rather than leaving ended sessions in the list until
+        # the next recompute replaces it) makes this idempotent: it is called both just
+        # before ready_by rolls forward and again while computing the schedule, and a
+        # session must never be credited twice.
+        still_pending = []
         for s in self._stored_sessions:
             end = parse_dt(s["end"])
-            if end <= now_dt:
-                start = parse_dt(s["start"])
-                duration = (end - start).total_seconds() / 3600
-                if s.get("tier", SESSION_TIER_REQUIRED) == SESSION_TIER_OPPORTUNISTIC:
-                    self._delivered_opportunistic_hours += duration
-                else:
-                    self._delivered_hours += duration
+            if end > now_dt:
+                still_pending.append(s)
+                continue
+            start = parse_dt(s["start"])
+            duration = (end - start).total_seconds() / 3600
+            if s.get("tier", SESSION_TIER_REQUIRED) == SESSION_TIER_OPPORTUNISTIC:
+                self._delivered_opportunistic_hours += duration
+            else:
+                self._delivered_hours += duration
+        self._stored_sessions = still_pending
 
     def _compute_sessions(self, all_prices: list[dict], now_dt: datetime) -> list[dict]:
         self._accrue_delivered_hours(now_dt)
@@ -791,9 +802,7 @@ class WholesaleEvScheduleCoordinator(DataUpdateCoordinator[dict]):
                 self.max_price,
             )
             required_future_dts = {s["date_time"] for s in required_future_slots}
-            required_future_sessions = slots_to_sessions(required_future_slots)
-        for s in required_future_sessions:
-            s["tier"] = SESSION_TIER_REQUIRED
+            required_future_sessions = self._sessions_from_slots(required_future_slots, SESSION_TIER_REQUIRED)
         if active_session and active_tier == SESSION_TIER_REQUIRED:
             active_session["tier"] = SESSION_TIER_REQUIRED
 
@@ -847,6 +856,21 @@ class WholesaleEvScheduleCoordinator(DataUpdateCoordinator[dict]):
         self._solve_cache[tier] = (key, frozenset(s["date_time"] for s in result))
         return result
 
+    @staticmethod
+    def _sessions_from_slots(slots: list[dict], tier: str) -> list[dict]:
+        """Group selected slots into sessions tagged with their tier.
+
+        All scheduling arithmetic is done on UTC instants (see scheduler.to_utc), but the
+        schedule the user sees -- and the one persisted -- has always carried Home
+        Assistant's local UTC offset, so start/end are rendered back into local time here.
+        """
+        sessions = slots_to_sessions(slots)
+        for session in sessions:
+            session["tier"] = tier
+            for key in ("start", "end"):
+                session[key] = dt_util.as_local(parse_dt(session[key])).isoformat()
+        return sessions
+
     def _compute_opportunistic_sessions(
         self,
         candidate_slots: list[dict],
@@ -897,10 +921,7 @@ class WholesaleEvScheduleCoordinator(DataUpdateCoordinator[dict]):
             self.opportunistic_ready_by,
             self.opportunistic_max_price,
         )
-        opportunistic_sessions = slots_to_sessions(opp_slots)
-        for s in opportunistic_sessions:
-            s["tier"] = SESSION_TIER_OPPORTUNISTIC
-        return opportunistic_sessions
+        return self._sessions_from_slots(opp_slots, SESSION_TIER_OPPORTUNISTIC)
 
     async def _async_recalculate(self) -> None:
         """Refresh in response to a user/automation edit, surfacing STATE_CALCULATING
@@ -942,7 +963,7 @@ class WholesaleEvScheduleCoordinator(DataUpdateCoordinator[dict]):
         all_prices = self._collect_prices()
         price_summary = summarize_prices(all_prices, now_dt)
 
-        if self._boost_end and self._boost_end > now_dt:
+        if self._boost_end and to_utc(self._boost_end) > to_utc(now_dt):
             return self._boosting_result(now_dt, price_summary)
         if self._boost_end:
             self._boost_end = None
@@ -951,7 +972,14 @@ class WholesaleEvScheduleCoordinator(DataUpdateCoordinator[dict]):
         # rolls forward to the next self._default_ready_by_hour automatically,
         # so "charge N hours by 7am" is a standing target rather than
         # something that needs resetting by hand every day.
-        if self.ready_by is None or self.ready_by <= now_dt:
+        if self.ready_by is None or to_utc(self.ready_by) <= to_utc(now_dt):
+            # Credit anything that has just finished to the cycle it belongs to BEFORE the
+            # counters reset. A session that ends exactly at ready_by (the cheapest window
+            # often runs right up to the deadline) is first seen as ended on this very
+            # refresh; crediting it after the reset would count it toward the NEW cycle
+            # and the next requirement would read as already delivered -- no charging
+            # at all on alternate days.
+            self._accrue_delivered_hours(now_dt)
             self.ready_by = next_ready_by(now_dt, self._default_ready_by_hour, self._default_ready_by_day_offset)
             # A new ready_by cycle is a fresh "charge N hours by this deadline"
             # request -- hours delivered toward the previous deadline don't
@@ -965,7 +993,7 @@ class WholesaleEvScheduleCoordinator(DataUpdateCoordinator[dict]):
             # override, not a permanent switch to independence -- "unless
             # it's been hand-modified, it always just +N days" holds for
             # exactly one required-ready_by cycle at a time.
-            self.opportunistic_ready_by = self.ready_by + timedelta(days=self._default_opportunistic_offset_days)
+            self.opportunistic_ready_by = add_local_days(self.ready_by, self._default_opportunistic_offset_days)
             self._delivered_opportunistic_hours = 0.0
             await self._async_save_stored_state()
 
@@ -1089,7 +1117,9 @@ class WholesaleEvScheduleCoordinator(DataUpdateCoordinator[dict]):
         time than required, then not enough price data published yet before
         ready_by, falling back to the tolerances only once both of those are ruled
         out -- see issue #26 (this used to always blame tolerances regardless)."""
-        hours_until_ready_by = max(0.0, (self.ready_by - now_dt).total_seconds() / 3600) if self.ready_by else 0.0
+        hours_until_ready_by = (
+            max(0.0, (to_utc(self.ready_by) - to_utc(now_dt)).total_seconds() / 3600) if self.ready_by else 0.0
+        )
         if self.required_hours > hours_until_ready_by:
             ready_by_label = self.ready_by.isoformat() if self.ready_by else "unset"
             return (
@@ -1099,7 +1129,8 @@ class WholesaleEvScheduleCoordinator(DataUpdateCoordinator[dict]):
 
         required_slots = max(1, math.ceil(self.required_hours * 2))
         if self.ready_by:
-            eligible_count = sum(1 for p in all_prices if p["date_time"] + timedelta(minutes=30) <= self.ready_by)
+            deadline = to_utc(self.ready_by)
+            eligible_count = sum(1 for p in all_prices if to_utc(p["date_time"]) + timedelta(minutes=30) <= deadline)
         else:
             eligible_count = len(all_prices)
         if eligible_count < required_slots:

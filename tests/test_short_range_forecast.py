@@ -432,14 +432,6 @@ async def test_the_23_hour_spring_day_merges_without_losing_a_slot(hass, freezer
     assert _utc_gaps(merged) == {timedelta(minutes=30)}
 
 
-@pytest.mark.xfail(
-    strict=True,
-    reason=(
-        "Pre-existing, provider-independent: deduplicate_and_sort_prices keys a dict on local-tz-aware "
-        "datetimes, which compare by wall clock when they share a tzinfo, so the repeated 01:00-02:00 hour "
-        "on the 25-hour autumn day collapses (50 slots -> 48). Remove this marker when that is fixed."
-    ),
-)
 async def test_the_25_hour_autumn_day_merges_without_losing_a_slot(hass, freezer):
     coordinator = await _london_coordinator(hass, freezer, _AUTUMN, 50)
 
