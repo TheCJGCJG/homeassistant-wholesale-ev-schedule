@@ -9,5 +9,7 @@ RUN pip install --no-cache-dir -r requirements-test.txt -r requirements-lint.txt
 COPY custom_components/ ./custom_components/
 COPY tests/ ./tests/
 COPY pytest.ini pyproject.toml .
+# Repo-level files the structural tests (tests/test_registry_and_hygiene.py) check.
+COPY hacs.json README.md DEVELOPING.md ./
 
 CMD ["pytest", "--cov=custom_components/wholesale_ev_schedule", "--cov-report=term-missing"]

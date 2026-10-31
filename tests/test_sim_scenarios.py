@@ -1,5 +1,7 @@
 """Day-in-the-life scenarios (see sim.py)."""
 
+from datetime import datetime, timedelta
+
 import pytest
 
 from .sim import PriceWorld, Sim
@@ -60,3 +62,44 @@ async def test_every_daily_cycle_delivers_the_required_hours_in_any_timezone(has
         hours = sim.charged_minutes[key] / 60
         assert 3.0 - slack - 1e-9 <= hours <= 3.0 + 1e-9, (key, sim.charged_minutes)
     assert sim.coordinator.ready_by.hour == 7
+
+
+# ---------------------------------------------------------------------------
+# A deadline hour that does not exist, or happens twice, on a clock-change day
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize("ready_hour", [0, 1, 2, 3, 6, 23])
+@pytest.mark.parametrize(
+    "tz,start",
+    [
+        ("Europe/London", "2026-03-27 12:00:00+00:00"),
+        ("Europe/London", "2026-10-23 12:00:00+00:00"),
+        ("America/New_York", "2026-03-06 12:00:00+00:00"),
+    ],
+    ids=["london_spring", "london_autumn", "new_york_spring"],
+)
+async def test_any_deadline_hour_gives_exactly_one_delivered_cycle_per_day_across_a_clock_change(
+    hass, freezer, tz, start, ready_hour
+):
+    sim = await Sim.create(
+        hass,
+        freezer,
+        start=start,
+        tz=tz,
+        world=PriceWorld(seed=6),
+        required_hours=2.0,
+        ready_hour=ready_hour,
+        step_minutes=10,
+    )
+    await sim.run(60 * 24 * 5, step=10)
+
+    deadlines = sorted(sim.charged_minutes)
+    full = deadlines[:-1]
+    assert len(full) >= 4
+    for key in full:
+        assert sim.charged_minutes[key] == 120, (key, sim.charged_minutes)
+    # one deadline per local calendar day, in order, none skipped or repeated
+    instants = [datetime.fromisoformat(k) for k in deadlines]
+    gaps = [(b - a) for a, b in zip(instants, instants[1:], strict=False)]
+    assert all(timedelta(hours=22) <= g <= timedelta(hours=26) for g in gaps), gaps
