@@ -5,6 +5,9 @@ services:
       - ./custom_components:/app/custom_components
       - ./tests:/app/tests
       - ./pytest.ini:/app/pytest.ini
+      - ./hacs.json:/app/hacs.json
+      - ./README.md:/app/README.md
+      - ./DEVELOPING.md:/app/DEVELOPING.md
     environment:
       - PYTHONUNBUFFERED=1
 

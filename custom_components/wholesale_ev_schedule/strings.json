@@ -9,6 +9,7 @@
           "update_interval_minutes": "Re-evaluate every (minutes)",
           "rates_provider": "Actual rates source",
           "forecast_provider": "Forecast source",
+          "short_range_provider": "Short-range forecast source (optional)",
           "default_required_hours": "Default charging hours required",
           "default_gamble_tolerance": "Default gamble tolerance",
           "default_max_price": "Default maximum price",
@@ -21,6 +22,7 @@
           "default_opportunistic_max_price": "Default opportunistic maximum price"
         },
         "data_description": {
+          "short_range_provider": "An optional second forecast that is more accurate but covers fewer days ahead (for example a day-ahead estimate published before the real rates). Wherever it has data it overrides the long-range forecast; actual rates always override it. Leave as None to use only the long-range forecast.",
           "update_interval_minutes": "How often prices are re-fetched and the full schedule recomputed. Charging desired also re-evaluates every minute on the clock regardless of this setting, so on/off transitions always land within about a minute of the real slot boundary.",
           "enable_opportunistic_charging": "Adds a second, optional charging tier that tops up beyond your required hours whenever prices are especially cheap, up to its own later deadline. Off by default — no extra entities are created unless you turn this on."
         }
@@ -62,6 +64,45 @@
           "forecast_price_key": "Forecast point key: price",
           "forecast_unit_multiplier": "Price multiplier (1 if already in the same unit as your actual rates)"
         }
+      },
+      "short_range_agile_rates_api": {
+        "title": "Agile Rates API short-range forecast",
+        "description": "The REST sensor entity you created from the Agile Rates API for your region (see agilerates.uk/api). Slots it no longer marks as predictions are treated as final rates; the rest are estimates, trusted at the confidence below.",
+        "data": {
+          "short_range_entity": "Short-range forecast entity",
+          "short_range_confidence": "Confidence in estimates (%)"
+        },
+        "data_description": {
+          "short_range_confidence": "How far to trust this source's estimates, from 0 to 100. Replaces the long-range forecast's distance-based discounting for these slots; your gamble tolerance still applies on top. Prices the source marks final are always trusted fully."
+        }
+      },
+      "short_range_agile_predict": {
+        "title": "AgilePredict-compatible short-range forecast",
+        "description": "An AgilePredict-compatible entity to use as the short-range forecast. All of its prices are treated as estimates, trusted at the confidence below.",
+        "data": {
+          "short_range_entity": "Short-range forecast entity",
+          "short_range_confidence": "Confidence in estimates (%)"
+        },
+        "data_description": {
+          "short_range_confidence": "How far to trust this source's estimates, from 0 to 100. Replaces the long-range forecast's distance-based discounting for these slots; your gamble tolerance still applies on top."
+        }
+      },
+      "short_range_custom": {
+        "title": "Custom short-range forecast source",
+        "description": "Point at any entity exposing an attribute holding a list of forecast points, and tell us the key names within each point. Key names may be dotted paths into nested data (e.g. rate.value).",
+        "data": {
+          "short_range_entity": "Short-range forecast entity",
+          "short_range_attribute": "Attribute name (list of forecast points)",
+          "short_range_datetime_key": "Forecast point key: date/time",
+          "short_range_price_key": "Forecast point key: price",
+          "short_range_unit_multiplier": "Price multiplier (1 if already in the same unit as your actual rates)",
+          "short_range_estimate_flag_key": "Forecast point key: is-estimate flag (optional)",
+          "short_range_confidence": "Confidence in estimates (%)"
+        },
+        "data_description": {
+          "short_range_estimate_flag_key": "Optional. A key whose value is true while a price is still an estimate and false once it is final. Final prices are treated like real rates. Leave blank to treat every price as an estimate.",
+          "short_range_confidence": "How far to trust this source's estimates, from 0 to 100. Replaces the long-range forecast's distance-based discounting for these slots; your gamble tolerance still applies on top."
+        }
       }
     },
     "abort": {
@@ -89,6 +130,7 @@
           "update_interval_minutes": "Re-evaluate every (minutes)",
           "rates_provider": "Actual rates source",
           "forecast_provider": "Forecast source",
+          "short_range_provider": "Short-range forecast source (optional)",
           "default_required_hours": "Default charging hours required",
           "default_gamble_tolerance": "Default gamble tolerance",
           "default_max_price": "Default maximum price",
@@ -101,6 +143,7 @@
           "default_opportunistic_max_price": "Default opportunistic maximum price"
         },
         "data_description": {
+          "short_range_provider": "An optional second forecast that is more accurate but covers fewer days ahead (for example a day-ahead estimate published before the real rates). Wherever it has data it overrides the long-range forecast; actual rates always override it. Leave as None to use only the long-range forecast.",
           "update_interval_minutes": "How often prices are re-fetched and the full schedule recomputed. Charging desired also re-evaluates every minute on the clock regardless of this setting, so on/off transitions always land within about a minute of the real slot boundary.",
           "enable_opportunistic_charging": "Adds a second, optional charging tier that tops up beyond your required hours whenever prices are especially cheap, up to its own later deadline. Off by default — no extra entities are created unless you turn this on."
         }
@@ -137,6 +180,45 @@
           "forecast_datetime_key": "Forecast point key: date/time",
           "forecast_price_key": "Forecast point key: price",
           "forecast_unit_multiplier": "Price multiplier (1 if already in the same unit as your actual rates)"
+        }
+      },
+      "short_range_agile_rates_api": {
+        "title": "Agile Rates API short-range forecast",
+        "description": "The REST sensor entity you created from the Agile Rates API for your region (see agilerates.uk/api). Slots it no longer marks as predictions are treated as final rates; the rest are estimates, trusted at the confidence below.",
+        "data": {
+          "short_range_entity": "Short-range forecast entity",
+          "short_range_confidence": "Confidence in estimates (%)"
+        },
+        "data_description": {
+          "short_range_confidence": "How far to trust this source's estimates, from 0 to 100. Replaces the long-range forecast's distance-based discounting for these slots; your gamble tolerance still applies on top. Prices the source marks final are always trusted fully."
+        }
+      },
+      "short_range_agile_predict": {
+        "title": "AgilePredict-compatible short-range forecast",
+        "description": "An AgilePredict-compatible entity to use as the short-range forecast. All of its prices are treated as estimates, trusted at the confidence below.",
+        "data": {
+          "short_range_entity": "Short-range forecast entity",
+          "short_range_confidence": "Confidence in estimates (%)"
+        },
+        "data_description": {
+          "short_range_confidence": "How far to trust this source's estimates, from 0 to 100. Replaces the long-range forecast's distance-based discounting for these slots; your gamble tolerance still applies on top."
+        }
+      },
+      "short_range_custom": {
+        "title": "Custom short-range forecast source",
+        "description": "Point at any entity exposing an attribute holding a list of forecast points, and tell us the key names within each point. Key names may be dotted paths into nested data (e.g. rate.value).",
+        "data": {
+          "short_range_entity": "Short-range forecast entity",
+          "short_range_attribute": "Attribute name (list of forecast points)",
+          "short_range_datetime_key": "Forecast point key: date/time",
+          "short_range_price_key": "Forecast point key: price",
+          "short_range_unit_multiplier": "Price multiplier (1 if already in the same unit as your actual rates)",
+          "short_range_estimate_flag_key": "Forecast point key: is-estimate flag (optional)",
+          "short_range_confidence": "Confidence in estimates (%)"
+        },
+        "data_description": {
+          "short_range_estimate_flag_key": "Optional. A key whose value is true while a price is still an estimate and false once it is final. Final prices are treated like real rates. Leave blank to treat every price as an estimate.",
+          "short_range_confidence": "How far to trust this source's estimates, from 0 to 100. Replaces the long-range forecast's distance-based discounting for these slots; your gamble tolerance still applies on top."
         }
       }
     }

@@ -95,6 +95,26 @@ CONF_FORECAST_ATTRIBUTE = "forecast_attribute"
 CONF_FORECAST_DATETIME_KEY = "forecast_datetime_key"
 CONF_FORECAST_PRICE_KEY = "forecast_price_key"
 
+# Config / options keys — short-range forecast (issue #54): an optional second
+# forecast that is more accurate but covers fewer days ahead than the one above, e.g.
+# a day-ahead estimate published before the real rates. Wherever it has data it
+# overrides the long-range forecast (actual rates still override it). Entirely
+# optional: none of these keys need exist, and an entry without them -- every entry
+# created before this feature -- behaves exactly as it always did.
+CONF_SHORT_RANGE_PROVIDER = "short_range_provider"
+CONF_SHORT_RANGE_ENTITY = "short_range_entity"
+CONF_SHORT_RANGE_ATTRIBUTE = "short_range_attribute"
+CONF_SHORT_RANGE_DATETIME_KEY = "short_range_datetime_key"
+CONF_SHORT_RANGE_PRICE_KEY = "short_range_price_key"
+CONF_SHORT_RANGE_UNIT_MULTIPLIER = "short_range_unit_multiplier"
+# Optional key locating a per-point "this price is still an estimate" flag; points
+# where it is falsy are treated as final (actual-grade). Unset = all estimates.
+CONF_SHORT_RANGE_ESTIMATE_FLAG_KEY = "short_range_estimate_flag_key"
+# 0-100, the same scale as gamble tolerance: how far to trust the short-range
+# forecast's *estimates*, in place of the long-range forecast's horizon-based decay.
+CONF_SHORT_RANGE_CONFIDENCE = "short_range_confidence"
+DEFAULT_SHORT_RANGE_CONFIDENCE = 95.0
+
 # Manual override for the charging_desired output — deliberately not tied to
 # any charger-specific "work state" entity, so this integration doesn't need
 # to know anything about your particular charger brand. Wire desired to
@@ -120,6 +140,19 @@ OPTIMIZATION_ALGORITHM_GREEDY = "greedy"
 OPTIMIZATION_ALGORITHM_OPTIMAL = "optimal"
 OPTIMIZATION_ALGORITHM_HYBRID = "hybrid"
 DEFAULT_OPTIMIZATION_ALGORITHM = OPTIMIZATION_ALGORITHM_GREEDY
+
+# Legal ranges of the live inputs. The number entities enforce them, and anything loaded from
+# storage is clamped to them, so one definition keeps the two from drifting apart.
+RANGE_HOURS = (0.0, 24.0)
+RANGE_PERCENT = (0.0, 100.0)
+RANGE_PRICE = (0.0, 200.0)
+RANGE_KWH = (0.0, 150.0)
+MAX_BOOST_HOURS = 8.0
+# An upper bound for the delivered-hours counters (a requirement can never exceed RANGE_HOURS[1]
+# per cycle); only there so a corrupt stored figure cannot sit in the system indefinitely.
+MAX_DELIVERED_HOURS = 10_000.0
+# The longest a single stored session can sensibly be.
+MAX_SESSION_HOURS = 48.0
 
 DEFAULT_GAMBLE_TOLERANCE = 50.0
 # The only block-length knob — a floor on how short a single charging block

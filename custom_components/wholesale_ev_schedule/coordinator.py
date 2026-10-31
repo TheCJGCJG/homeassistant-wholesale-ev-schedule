@@ -42,6 +42,14 @@ from .const import (
     CONF_RATE_VALUE_KEY,
     CONF_RATES_ATTRIBUTE,
     CONF_RATES_PROVIDER,
+    CONF_SHORT_RANGE_ATTRIBUTE,
+    CONF_SHORT_RANGE_CONFIDENCE,
+    CONF_SHORT_RANGE_DATETIME_KEY,
+    CONF_SHORT_RANGE_ENTITY,
+    CONF_SHORT_RANGE_ESTIMATE_FLAG_KEY,
+    CONF_SHORT_RANGE_PRICE_KEY,
+    CONF_SHORT_RANGE_PROVIDER,
+    CONF_SHORT_RANGE_UNIT_MULTIPLIER,
     CONF_UPDATE_INTERVAL_MINUTES,
     DEFAULT_ASSUMED_CHARGE_KWH,
     DEFAULT_CHARGE_OVERRIDE,
@@ -64,30 +72,56 @@ from .const import (
     DEFAULT_READY_BY_DAY_OFFSET,
     DEFAULT_READY_BY_HOUR,
     DEFAULT_REQUIRED_HOURS,
+    DEFAULT_SHORT_RANGE_CONFIDENCE,
     DEFAULT_UPDATE_INTERVAL_MINUTES,
     DOMAIN,
+    MAX_BOOST_HOURS,
+    MAX_DELIVERED_HOURS,
+    MAX_SESSION_HOURS,
     OPTIMIZATION_ALGORITHM_GREEDY,
     OPTIMIZATION_ALGORITHM_HYBRID,
     OPTIMIZATION_ALGORITHM_OPTIMAL,
+    RANGE_HOURS,
+    RANGE_KWH,
+    RANGE_PERCENT,
+    RANGE_PRICE,
     STATE_BOOSTING,
     STATE_ERROR,
     STATE_IDLE,
     STATE_UNSCHEDULABLE,
     STORAGE_VERSION,
 )
-from .providers import FORECAST_PROVIDER_AGILE_PREDICT, FORECAST_PROVIDERS, RATE_PROVIDER_OCTOPUS_ENERGY, RATE_PROVIDERS
+from .price_parsing import PointSpec, is_estimate, normalize_to_half_hours, resolve_key
+from .providers import (
+    FORECAST_PROVIDER_AGILE_PREDICT,
+    FORECAST_PROVIDERS,
+    RATE_PROVIDER_OCTOPUS_ENERGY,
+    RATE_PROVIDERS,
+    SHORT_RANGE_PROVIDER_NONE,
+    SHORT_RANGE_PROVIDERS,
+)
 from .scheduler import (
+    SOURCE_CURRENT_ACTUAL,
+    SOURCE_NEXT_ACTUAL,
+    SOURCE_PREDICTED,
+    SOURCE_SHORT_RANGE,
+    SOURCE_SHORT_RANGE_FINAL,
     TIER_ACTUAL,
+    add_local_days,
     assign_credibilities,
+    clip_active_session,
     compute_hours_remaining,
     deduplicate_and_sort_prices,
     determine_state,
     find_optimal_slots,
+    fit_future_sessions,
     next_ready_by,
     parse_dt,
     prune_and_classify,
+    session_slots,
     slots_to_sessions,
     summarize_prices,
+    to_utc,
 )
 
 _LOGGER = logging.getLogger(__name__)
@@ -107,6 +141,23 @@ _VALID_OPTIMIZATION_ALGORITHMS = {
 # charging existed -- an upgrade must never misroute or drop that state.
 SESSION_TIER_REQUIRED = "required"
 SESSION_TIER_OPPORTUNISTIC = "opportunistic"
+
+
+# No deadline the user could have set lies further ahead than this; a stored one that does is corrupt.
+_MAX_DEADLINE_AHEAD = timedelta(days=400)
+
+
+def stored_state(hass: HomeAssistant, entry_id: str) -> Store:
+    """The persisted-state store for one config entry. A single definition so the key used to
+    write it and the key used to delete it (when the entry is removed) cannot drift apart."""
+    return Store(hass, STORAGE_VERSION, f"{DOMAIN}_{entry_id}_state")
+
+
+def _non_blank_text(value) -> str | None:
+    """`value` stripped, or None if it isn't a string or is blank -- for an optional
+    text option that may be stored as "", whitespace, None, or (from a hand-edited
+    entry) something that isn't text at all."""
+    return value.strip() or None if isinstance(value, str) else None
 
 
 class WholesaleEvScheduleCoordinator(DataUpdateCoordinator[dict]):
@@ -147,7 +198,7 @@ class WholesaleEvScheduleCoordinator(DataUpdateCoordinator[dict]):
         self._calculating = False
         # tier -> (inputs key, selected date_times); see _solve. In-memory only.
         self._solve_cache: dict[str, tuple[tuple, frozenset]] = {}
-        self._store = Store(hass, STORAGE_VERSION, f"{DOMAIN}_{entry.entry_id}_state")
+        self._store = stored_state(hass, entry.entry_id)
 
         # Setup-time defaults (see class docstring) -- fall back to the
         # hardcoded DEFAULT_* constants / 0 so an install with none of these
@@ -204,6 +255,12 @@ class WholesaleEvScheduleCoordinator(DataUpdateCoordinator[dict]):
         self._stored_sessions: list[dict] = []
         self._boost_end: datetime | None = None
         self._delivered_hours: float = 0.0
+        # How many blocks shorter than min_block_hours this request has already run. The plan may
+        # contain at most one such block, but a plan is only ever the remainder of the request: once
+        # a short block has run (or is running) the next solve must not be handed a fresh allowance,
+        # or every short block that runs would earn another and the minimum block length -- there
+        # to stop the charger cycling -- would not hold across a day. Reset with delivered hours.
+        self._short_blocks_used: int = 0
 
     @property
     def instance_name(self) -> str:
@@ -226,6 +283,15 @@ class WholesaleEvScheduleCoordinator(DataUpdateCoordinator[dict]):
         provider_id = self.entry.options.get(CONF_FORECAST_PROVIDER, FORECAST_PROVIDER_AGILE_PREDICT)
         return FORECAST_PROVIDERS.get(provider_id, {}).get("label", provider_id)
 
+    @property
+    def short_range_provider_label(self) -> str | None:
+        """The configured short-range provider's label, or None when it isn't in use
+        (so callers can leave it out entirely for an install that never opted in)."""
+        if self._short_range_spec() is None:
+            return None
+        provider_id = self.entry.options.get(CONF_SHORT_RANGE_PROVIDER, SHORT_RANGE_PROVIDER_NONE)
+        return SHORT_RANGE_PROVIDERS.get(provider_id, {}).get("label", provider_id)
+
     async def async_load_stored_state(self) -> None:
         """Restore live inputs and the in-progress schedule after a restart.
         ready_by defaults to the next self._default_ready_by_hour (at least
@@ -236,43 +302,57 @@ class WholesaleEvScheduleCoordinator(DataUpdateCoordinator[dict]):
         # value here (schema drift, a manual edit) is our own responsibility. A
         # malformed ready_by/boost_end degrades to "never set" rather than crashing
         # setup entirely.
-        self.ready_by = self._parse_stored_dt(data.get("ready_by"), "ready_by")
+        self.ready_by = self._parse_stored_dt(data.get("ready_by"), "ready_by", max_ahead=_MAX_DEADLINE_AHEAD)
         if self.ready_by is None:
             self.ready_by = next_ready_by(dt_util.now(), self._default_ready_by_hour, self._default_ready_by_day_offset)
         self.required_hours = self._parse_stored_float(
-            data.get("required_hours"), self._default_required_hours, "required_hours"
+            data.get("required_hours"), self._default_required_hours, "required_hours", RANGE_HOURS
         )
         self.gamble_tolerance = self._parse_stored_float(
-            data.get("gamble_tolerance"), self._default_gamble_tolerance, "gamble_tolerance"
+            data.get("gamble_tolerance"), self._default_gamble_tolerance, "gamble_tolerance", RANGE_PERCENT
         )
         self.min_block_hours = self._parse_stored_float(
-            data.get("min_block_hours"), self._default_min_block_hours, "min_block_hours"
+            data.get("min_block_hours"), self._default_min_block_hours, "min_block_hours", RANGE_HOURS
         )
-        self.max_price = self._parse_stored_float(data.get("max_price"), self._default_max_price, "max_price")
+        self.max_price = self._parse_stored_float(
+            data.get("max_price"), self._default_max_price, "max_price", RANGE_PRICE
+        )
         self.charge_override = self._parse_stored_charge_override(data.get("charge_override"))
         self.optimization_algorithm = self._parse_stored_optimization_algorithm(data.get("optimization_algorithm"))
         self.assumed_charge_kwh = self._parse_stored_float(
-            data.get("assumed_charge_kwh"), DEFAULT_ASSUMED_CHARGE_KWH, "assumed_charge_kwh"
+            data.get("assumed_charge_kwh"), DEFAULT_ASSUMED_CHARGE_KWH, "assumed_charge_kwh", RANGE_KWH
         )
         self._stored_sessions = self._sanitize_stored_sessions(data.get("sessions", []))
-        self._boost_end = self._parse_stored_dt(data.get("boost_end"), "boost_end")
-        self._delivered_hours = self._parse_stored_float(data.get("delivered_hours"), 0.0, "delivered_hours")
+        # No boost can be longer than the slider's maximum, so a stored end further ahead than that
+        # is corrupt -- and would otherwise hold the charger on for as long as it said.
+        self._boost_end = self._parse_stored_dt(
+            data.get("boost_end"), "boost_end", max_ahead=timedelta(hours=MAX_BOOST_HOURS)
+        )
+        self._delivered_hours = self._parse_stored_float(
+            data.get("delivered_hours"), 0.0, "delivered_hours", (0.0, MAX_DELIVERED_HOURS)
+        )
+        self._short_blocks_used = round(
+            self._parse_stored_float(data.get("short_blocks_used"), 0.0, "short_blocks_used", (0.0, 1000.0))
+        )
 
-        # Opportunistic charging state. A missing/invalid opportunistic_enabled
-        # degrades to False (same "off by default" stance as a fresh install),
-        # not raise -- a stored non-bool here (schema drift, a manual edit) is
-        # our own responsibility same as every other _parse_stored_* helper.
-        self.opportunistic_enabled = bool(data.get("opportunistic_enabled", False))
+        # Opportunistic charging state. Anything but a real True degrades to False (the same "off
+        # by default" stance as a fresh install): bool("false") is True, so truthiness would turn a
+        # stray string into "on".
+        self.opportunistic_enabled = data.get("opportunistic_enabled") is True
         self.opportunistic_target_hours = self._parse_stored_float(
             data.get("opportunistic_target_hours"),
             self._default_opportunistic_target_hours,
             "opportunistic_target_hours",
+            RANGE_HOURS,
         )
         self.opportunistic_max_price = self._parse_stored_float(
-            data.get("opportunistic_max_price"), self._default_opportunistic_max_price, "opportunistic_max_price"
+            data.get("opportunistic_max_price"),
+            self._default_opportunistic_max_price,
+            "opportunistic_max_price",
+            RANGE_PRICE,
         )
         self.opportunistic_ready_by = self._parse_stored_dt(
-            data.get("opportunistic_ready_by"), "opportunistic_ready_by"
+            data.get("opportunistic_ready_by"), "opportunistic_ready_by", max_ahead=_MAX_DEADLINE_AHEAD
         )
         if self.opportunistic_ready_by is None:
             # Never stored (a fresh install, or an upgrade from before
@@ -280,9 +360,9 @@ class WholesaleEvScheduleCoordinator(DataUpdateCoordinator[dict]):
             # would be derived on the next required-ready_by rollover
             # (_async_update_data), rather than leaving it None until that
             # rollover actually happens, which could be hours or days away.
-            self.opportunistic_ready_by = self.ready_by + timedelta(days=self._default_opportunistic_offset_days)
+            self.opportunistic_ready_by = add_local_days(self.ready_by, self._default_opportunistic_offset_days)
         self._delivered_opportunistic_hours = self._parse_stored_float(
-            data.get("delivered_opportunistic_hours"), 0.0, "delivered_opportunistic_hours"
+            data.get("delivered_opportunistic_hours"), 0.0, "delivered_opportunistic_hours", (0.0, MAX_DELIVERED_HOURS)
         )
         await self._async_save_stored_state()
 
@@ -301,37 +381,62 @@ class WholesaleEvScheduleCoordinator(DataUpdateCoordinator[dict]):
                 _LOGGER.warning("Discarding malformed stored session (not a dict): %r", s)
                 continue
             try:
-                parse_dt(s["start"])
-                parse_dt(s["end"])
-            except (KeyError, TypeError, ValueError) as err:
+                hours = (to_utc(parse_dt(s["end"])) - to_utc(parse_dt(s["start"]))).total_seconds() / 3600
+            except (KeyError, TypeError, ValueError, OverflowError) as err:
                 _LOGGER.warning("Discarding malformed stored session (%s): %r", err, s)
+                continue
+            if not 0 < hours <= MAX_SESSION_HOURS:
+                _LOGGER.warning("Discarding implausible stored session (%.1fh long): %r", hours, s)
                 continue
             sessions.append(s)
         return sessions
 
-    def _parse_stored_dt(self, value, field_name: str) -> datetime | None:
+    def _parse_stored_dt(self, value, field_name: str, max_ahead: timedelta | None = None) -> datetime | None:
         """parse_dt a stored value, degrading to None (rather than raising) if it's
-        present but not a parseable datetime -- see async_load_stored_state."""
+        present but not a parseable datetime -- see async_load_stored_state. `max_ahead`
+        rejects a value further in the future than anything this field could legitimately
+        hold: such a value is corrupt, and some (a deadline in year 9999) would overflow the
+        date arithmetic done on it later."""
         if not value:
             return None
         try:
-            return parse_dt(value)
-        except (TypeError, ValueError) as err:
+            parsed = parse_dt(value)
+            if max_ahead is not None and to_utc(parsed) - dt_util.utcnow() > max_ahead:
+                _LOGGER.warning("Stored %s %r is implausibly far ahead; treating as unset", field_name, value)
+                return None
+        except (TypeError, ValueError, OverflowError) as err:
             _LOGGER.warning("Stored %s %r is invalid (%s); treating as unset", field_name, value, err)
             return None
+        return parsed
 
-    def _parse_stored_float(self, value, default: float, field_name: str) -> float:
-        """Coerce a stored numeric tuning value to float, degrading to `default`
-        (rather than raising downstream, e.g. `if self.required_hours <= 0` or
-        scheduler.py arithmetic on a str/None) if it's missing or not coercible
-        -- see issue #35."""
+    def _parse_stored_float(
+        self, value, default: float, field_name: str, bounds: tuple[float, float] | None = None
+    ) -> float:
+        """Coerce a stored numeric tuning value to a finite float within `bounds`, degrading to
+        `default` (rather than raising downstream, e.g. `if self.required_hours <= 0` or
+        scheduler.py arithmetic on a str/None) if it's missing, not coercible, a boolean or
+        not finite -- see issue #35. A finite value outside `bounds` is clamped to them: the
+        number entities enforce the same ranges, so nothing legitimate lies beyond them, and a
+        NaN or infinity left the whole entry stuck retrying setup (the class of issue #37)."""
         if value is None:
             return default
+        if isinstance(value, bool):
+            _LOGGER.warning("Stored %s %r is not a number; using default %s", field_name, value, default)
+            return default
         try:
-            return float(value)
+            number = float(value)
         except (TypeError, ValueError) as err:
             _LOGGER.warning("Stored %s %r is invalid (%s); using default %s", field_name, value, err, default)
             return default
+        if not math.isfinite(number):
+            _LOGGER.warning("Stored %s %r is not finite; using default %s", field_name, value, default)
+            return default
+        if bounds is not None:
+            clamped = min(max(number, bounds[0]), bounds[1])
+            if clamped != number:
+                _LOGGER.warning("Stored %s %r is out of range; using %s", field_name, value, clamped)
+            return clamped
+        return number
 
     def _parse_stored_charge_override(self, value: str | None) -> str:
         """Validate a stored charge_override against the enum, degrading to
@@ -339,7 +444,8 @@ class WholesaleEvScheduleCoordinator(DataUpdateCoordinator[dict]):
         would otherwise silently behave like "auto" (neither force branch in
         _with_diagnostics matches it) while still being reported back as the
         select entity's current_option, outside its declared options (#36)."""
-        if value in _VALID_CHARGE_OVERRIDES:
+        # (a stored list/dict is unhashable and would raise on a set lookup)
+        if isinstance(value, str) and value in _VALID_CHARGE_OVERRIDES:
             return value
         if value is not None:
             _LOGGER.warning("Stored charge_override %r is invalid; using default %s", value, DEFAULT_CHARGE_OVERRIDE)
@@ -352,7 +458,7 @@ class WholesaleEvScheduleCoordinator(DataUpdateCoordinator[dict]):
         silently fall through find_optimal_slots' own default (harmless, but
         reported back as the select entity's current_option outside its declared
         options)."""
-        if value in _VALID_OPTIMIZATION_ALGORITHMS:
+        if isinstance(value, str) and value in _VALID_OPTIMIZATION_ALGORITHMS:
             return value
         if value is not None:
             _LOGGER.warning(
@@ -376,6 +482,7 @@ class WholesaleEvScheduleCoordinator(DataUpdateCoordinator[dict]):
                 "sessions": self._stored_sessions,
                 "boost_end": self._boost_end.isoformat() if self._boost_end else None,
                 "delivered_hours": self._delivered_hours,
+                "short_blocks_used": self._short_blocks_used,
                 "opportunistic_enabled": self.opportunistic_enabled,
                 "opportunistic_target_hours": self.opportunistic_target_hours,
                 "opportunistic_max_price": self.opportunistic_max_price,
@@ -401,12 +508,19 @@ class WholesaleEvScheduleCoordinator(DataUpdateCoordinator[dict]):
         if not math.isfinite(value):
             raise ServiceValidationError(f"{field_name} must be a finite number, got {value!r}")
 
+    def _reset_required_progress(self) -> None:
+        """Forget what the current request has delivered: a new target, a new deadline cycle, Stop
+        and Reset are all a fresh request, so neither the hours delivered nor the short blocks
+        already spent carry over."""
+        self._delivered_hours = 0.0
+        self._short_blocks_used = 0
+
     async def async_set_required_hours(self, value: float) -> None:
         self._reject_non_finite(value, "required_hours")
         self.required_hours = value
         # A new target starts fresh -- hours delivered under whatever the
         # previous required_hours was don't carry over and offset it.
-        self._delivered_hours = 0.0
+        self._reset_required_progress()
         await self._async_save_stored_state()
         await self._async_recalculate()
 
@@ -483,7 +597,8 @@ class WholesaleEvScheduleCoordinator(DataUpdateCoordinator[dict]):
         await self._async_recalculate()
 
     async def async_start_boost(self, duration_hours: float) -> None:
-        self._boost_end = dt_util.now() + timedelta(hours=duration_hours)
+        # Absolute arithmetic (UTC) so a boost spanning a DST change lasts the hours asked for.
+        self._boost_end = dt_util.as_local(dt_util.utcnow() + timedelta(hours=duration_hours))
         await self._async_save_stored_state()
         await self._async_recalculate()
 
@@ -503,7 +618,7 @@ class WholesaleEvScheduleCoordinator(DataUpdateCoordinator[dict]):
         self._stored_sessions = []
         self._boost_end = None
         self.required_hours = 0.0
-        self._delivered_hours = 0.0
+        self._reset_required_progress()
         self.opportunistic_target_hours = 0.0
         self._delivered_opportunistic_hours = 0.0
         await self._async_save_stored_state()
@@ -543,11 +658,11 @@ class WholesaleEvScheduleCoordinator(DataUpdateCoordinator[dict]):
         self.optimization_algorithm = DEFAULT_OPTIMIZATION_ALGORITHM
         self.opportunistic_target_hours = self._default_opportunistic_target_hours
         self.opportunistic_max_price = self._default_opportunistic_max_price
-        self.opportunistic_ready_by = self.ready_by + timedelta(days=self._default_opportunistic_offset_days)
+        self.opportunistic_ready_by = add_local_days(self.ready_by, self._default_opportunistic_offset_days)
         self._delivered_opportunistic_hours = 0.0
         self._stored_sessions = []
         self._boost_end = None
-        self._delivered_hours = 0.0
+        self._reset_required_progress()
         await self._async_save_stored_state()
         await self._async_recalculate()
 
@@ -563,27 +678,77 @@ class WholesaleEvScheduleCoordinator(DataUpdateCoordinator[dict]):
             return None
         return entity
 
-    def _parse_rate_entity(self, entity_id: str | None, source_label: str) -> list[dict]:
+    def _rates_spec(self) -> PointSpec:
+        options = self._options
+        return PointSpec(
+            attribute=options.get(CONF_RATES_ATTRIBUTE, DEFAULT_RATES_ATTRIBUTE),
+            time_key=options.get(CONF_RATE_START_KEY, DEFAULT_RATE_START_KEY),
+            price_key=options.get(CONF_RATE_VALUE_KEY, DEFAULT_RATE_VALUE_KEY),
+            multiplier=float(options.get(CONF_RATE_UNIT_MULTIPLIER, DEFAULT_RATE_UNIT_MULTIPLIER)),
+        )
+
+    def _forecast_spec(self) -> PointSpec:
+        options = self._options
+        return PointSpec(
+            attribute=options.get(CONF_FORECAST_ATTRIBUTE, DEFAULT_FORECAST_ATTRIBUTE),
+            time_key=options.get(CONF_FORECAST_DATETIME_KEY, DEFAULT_FORECAST_DATETIME_KEY),
+            price_key=options.get(CONF_FORECAST_PRICE_KEY, DEFAULT_FORECAST_PRICE_KEY),
+            multiplier=float(options.get(CONF_FORECAST_UNIT_MULTIPLIER, DEFAULT_FORECAST_UNIT_MULTIPLIER)),
+        )
+
+    def _short_range_spec(self) -> PointSpec | None:
+        """The short-range forecast's parsing spec, or None when it isn't configured.
+
+        "Configured" needs both a non-"none" provider and an entity: the options flow
+        leaves stale short-range keys behind when switching back to "none" (the same
+        way it does for the long-range forecast), and an entry created before this
+        feature has no short-range keys at all -- both must read as simply off.
+        """
+        options = self._options
+        provider = options.get(CONF_SHORT_RANGE_PROVIDER, SHORT_RANGE_PROVIDER_NONE)
+        if provider == SHORT_RANGE_PROVIDER_NONE or not options.get(CONF_SHORT_RANGE_ENTITY):
+            return None
+        return PointSpec(
+            attribute=options.get(CONF_SHORT_RANGE_ATTRIBUTE, DEFAULT_FORECAST_ATTRIBUTE),
+            time_key=options.get(CONF_SHORT_RANGE_DATETIME_KEY, DEFAULT_FORECAST_DATETIME_KEY),
+            price_key=options.get(CONF_SHORT_RANGE_PRICE_KEY, DEFAULT_FORECAST_PRICE_KEY),
+            multiplier=float(options.get(CONF_SHORT_RANGE_UNIT_MULTIPLIER, DEFAULT_FORECAST_UNIT_MULTIPLIER)),
+            estimate_flag_key=_non_blank_text(options.get(CONF_SHORT_RANGE_ESTIMATE_FLAG_KEY)),
+        )
+
+    def _short_range_base_credibility(self) -> float:
+        """The configured short-range confidence as the 0-1 base credibility the
+        scheduler wants. An unparseable stored value degrades to the default rather
+        than failing the whole update; range clamping is the scheduler's job."""
+        try:
+            percent = float(self._options.get(CONF_SHORT_RANGE_CONFIDENCE, DEFAULT_SHORT_RANGE_CONFIDENCE))
+        except (TypeError, ValueError):
+            return DEFAULT_SHORT_RANGE_CONFIDENCE / 100.0
+        return percent / 100.0 if math.isfinite(percent) else DEFAULT_SHORT_RANGE_CONFIDENCE / 100.0
+
+    def _parse_points(self, entity_id: str | None, spec: PointSpec, source_for_point) -> list[dict]:
+        """Read one price source into slot dicts. `source_for_point(point)` tags each
+        slot with its scheduler.SOURCE_* label; malformed points are skipped (logged at
+        debug), never fatal -- one bad row must not take the whole update down."""
         entity = self._entity_state(entity_id)
         if not entity:
             return []
-        options = self._options
-        attribute = options.get(CONF_RATES_ATTRIBUTE, DEFAULT_RATES_ATTRIBUTE)
-        start_key = options.get(CONF_RATE_START_KEY, DEFAULT_RATE_START_KEY)
-        value_key = options.get(CONF_RATE_VALUE_KEY, DEFAULT_RATE_VALUE_KEY)
-        multiplier = float(options.get(CONF_RATE_UNIT_MULTIPLIER, DEFAULT_RATE_UNIT_MULTIPLIER))
 
-        slots = []
+        parsed = []
         # `.get(attribute, [])`'s default only applies when the key is absent -- an
         # explicit `None` (a real pattern for "not yet populated" attributes) would
-        # otherwise reach `for rate in None:` and crash the whole coordinator update.
-        for rate in entity.attributes.get(attribute) or []:
+        # otherwise reach `for point in None:` and crash the whole coordinator update.
+        for point in entity.attributes.get(spec.attribute) or []:
             try:
-                dt_val = rate.get(start_key)
-                price_val = rate.get(value_key)
-                if dt_val is None or price_val is None:
+                time_val = resolve_key(point, spec.time_key)
+                price_val = resolve_key(point, spec.price_key)
+                if time_val is None or price_val is None:
                     continue
-                slot_dt = dt_util.as_local(parse_dt(dt_val))
+                if isinstance(price_val, bool):
+                    raise ValueError(f"a boolean is not a price: {price_val!r}")
+                # Sub-second noise (".000Z", ".123456") must not stop a slot lining up with the
+                # exact half-hour grid or with the same slot from another source.
+                slot_dt = dt_util.as_utc(parse_dt(time_val)).replace(microsecond=0)
                 raw_price = float(price_val)
                 # float() accepts the strings "nan"/"inf" without error (unlike
                 # "N/A", which correctly raises below) -- treat as malformed the
@@ -592,62 +757,46 @@ class WholesaleEvScheduleCoordinator(DataUpdateCoordinator[dict]):
                 # it not reliably sort to the back (issue #33).
                 if not math.isfinite(raw_price):
                     raise ValueError(f"non-finite price: {price_val!r}")
-                slots.append(
-                    {
-                        "date_time": slot_dt,
-                        "raw_price": round(raw_price * multiplier, 4),
-                        "source": source_label,
-                    }
-                )
+                parsed.append((slot_dt, round(raw_price * spec.multiplier, 4), point))
             except (TypeError, ValueError, AttributeError) as err:
                 # AttributeError covers a non-dict row (e.g. the attribute shaped as
-                # a dict instead of a list, so `rate` is a plain str key) -- `.get()`
-                # on it raises AttributeError, not TypeError/ValueError (issue #32).
-                _LOGGER.debug("Skipping %s rate: %s", source_label, err)
-        return slots
+                # a dict instead of a list, so `point` is a plain str key) -- not
+                # TypeError/ValueError (issue #32).
+                _LOGGER.debug("Skipping malformed price point from %s: %s", entity_id, err)
+        # A regular hourly or sub-half-hourly feed is put on the 30-minute grid the scheduler
+        # works in; a half-hourly one (the common case) passes through untouched.
+        return [
+            {"date_time": start, "raw_price": price, "source": source_for_point(point)}
+            for start, price, point in normalize_to_half_hours(parsed)
+        ]
 
-    def _parse_forecast_entity(self, entity_id: str | None) -> list[dict]:
-        entity = self._entity_state(entity_id)
-        if not entity:
+    def _parse_short_range(self) -> list[dict]:
+        spec = self._short_range_spec()
+        if spec is None:
             return []
-        options = self._options
-        attribute = options.get(CONF_FORECAST_ATTRIBUTE, DEFAULT_FORECAST_ATTRIBUTE)
-        datetime_key = options.get(CONF_FORECAST_DATETIME_KEY, DEFAULT_FORECAST_DATETIME_KEY)
-        price_key = options.get(CONF_FORECAST_PRICE_KEY, DEFAULT_FORECAST_PRICE_KEY)
-        multiplier = float(options.get(CONF_FORECAST_UNIT_MULTIPLIER, DEFAULT_FORECAST_UNIT_MULTIPLIER))
 
-        slots = []
-        # See _parse_rate_entity -- `.get(attribute, [])`'s default only applies when
-        # the key is absent, not when it's explicitly `None`.
-        for point in entity.attributes.get(attribute) or []:
-            try:
-                dt_str = point.get(datetime_key)
-                price_val = point.get(price_key)
-                if dt_str is None or price_val is None:
-                    continue
-                slot_dt = dt_util.as_local(parse_dt(dt_str))
-                raw_price = float(price_val)
-                # See _parse_rate_entity -- reject non-finite floats (issue #33).
-                if not math.isfinite(raw_price):
-                    raise ValueError(f"non-finite price: {price_val!r}")
-                slots.append(
-                    {
-                        "date_time": slot_dt,
-                        "raw_price": round(raw_price * multiplier, 4),
-                        "source": "predicted",
-                    }
-                )
-            except (TypeError, ValueError, AttributeError) as err:
-                # See _parse_rate_entity -- AttributeError covers a non-dict row.
-                _LOGGER.debug("Skipping predicted price: %s", err)
+        def source_for_point(point) -> str:
+            if spec.estimate_flag_key is None or is_estimate(resolve_key(point, spec.estimate_flag_key)):
+                return SOURCE_SHORT_RANGE
+            return SOURCE_SHORT_RANGE_FINAL
+
+        slots = self._parse_points(self._options.get(CONF_SHORT_RANGE_ENTITY), spec, source_for_point)
+        # Only estimates carry the configured confidence; a point the source marks
+        # final is actual-grade and ranks at full confidence like any real rate.
+        confidence = self._short_range_base_credibility()
+        for slot in slots:
+            if slot["source"] == SOURCE_SHORT_RANGE:
+                slot["base_credibility"] = confidence
         return slots
 
     def _collect_prices(self) -> list[dict]:
         options = self._options
+        rates_spec = self._rates_spec()
         return (
-            self._parse_rate_entity(options.get(CONF_CURRENT_RATES_ENTITY), "current_actual")
-            + self._parse_rate_entity(options.get(CONF_NEXT_RATES_ENTITY), "next_actual")
-            + self._parse_forecast_entity(options.get(CONF_FORECAST_ENTITY))
+            self._parse_points(options.get(CONF_CURRENT_RATES_ENTITY), rates_spec, lambda _p: SOURCE_CURRENT_ACTUAL)
+            + self._parse_points(options.get(CONF_NEXT_RATES_ENTITY), rates_spec, lambda _p: SOURCE_NEXT_ACTUAL)
+            + self._parse_points(options.get(CONF_FORECAST_ENTITY), self._forecast_spec(), lambda _p: SOURCE_PREDICTED)
+            + self._parse_short_range()
         )
 
     def _accrue_delivered_hours(self, now_dt: datetime) -> None:
@@ -668,19 +817,104 @@ class WholesaleEvScheduleCoordinator(DataUpdateCoordinator[dict]):
         from scratch, even though the requirement was already met
         (hours_remaining bouncing back up after completion).
         """
+        # Consuming what is counted (rather than leaving ended sessions in the list until
+        # the next recompute replaces it) makes this idempotent: it is called both just
+        # before ready_by rolls forward and again while computing the schedule, and a
+        # session must never be credited twice.
+        still_pending = []
         for s in self._stored_sessions:
             end = parse_dt(s["end"])
-            if end <= now_dt:
-                start = parse_dt(s["start"])
-                duration = (end - start).total_seconds() / 3600
-                if s.get("tier", SESSION_TIER_REQUIRED) == SESSION_TIER_OPPORTUNISTIC:
-                    self._delivered_opportunistic_hours += duration
-                else:
-                    self._delivered_hours += duration
+            if end > now_dt:
+                still_pending.append(s)
+                continue
+            start = parse_dt(s["start"])
+            duration = (end - start).total_seconds() / 3600
+            if s.get("tier", SESSION_TIER_REQUIRED) == SESSION_TIER_OPPORTUNISTIC:
+                self._delivered_opportunistic_hours += duration
+            else:
+                self._delivered_hours += duration
+                self._count_if_short(session_slots(s))
+        self._stored_sessions = still_pending
+
+    def _min_block_slots(self) -> int:
+        """The minimum block length in half-hours for this request, as the scheduler applies it:
+        capped at the whole requirement, since a request smaller than the minimum is one block."""
+        return min(max(1, math.ceil(self.min_block_hours * 2)), max(1, math.ceil(self.required_hours * 2)))
+
+    def _count_if_short(self, slots: int) -> None:
+        """Record a finished required block that ran for fewer than the minimum number of slots."""
+        if 0 < slots < self._min_block_slots():
+            self._short_blocks_used += 1
+
+    def _opportunistic_allowance_slots(self) -> int:
+        """Half-hours of opportunistic charging still wanted: none while it's switched off, has
+        no target, or has no deadline yet; otherwise the target less what has been delivered."""
+        if not self.opportunistic_enabled or self.opportunistic_target_hours <= 0 or not self.opportunistic_ready_by:
+            return 0
+        wanted = max(1, math.ceil(self.opportunistic_target_hours * 2))
+        return max(0, wanted - math.ceil(round(self._delivered_opportunistic_hours * 2, 6)))
+
+    def _clip_active_session(self, active_session: dict | None, now_dt: datetime) -> dict | None:
+        """Stop an in-progress block from outliving what its tier still wants.
+
+        A session is planned once and carried forward untouched while it runs, so lowering the
+        requirement, pausing opportunistic charging, or pulling a deadline earlier would
+        otherwise change nothing until the block happened to end (see
+        scheduler.clip_active_session). A session stopped here is credited with the hours it
+        actually ran, exactly as if it had ended on its own.
+        """
+        if active_session is None:
+            return None
+        if active_session.get("tier", SESSION_TIER_REQUIRED) == SESSION_TIER_OPPORTUNISTIC:
+            allowed, deadline = self._opportunistic_allowance_slots(), self.opportunistic_ready_by
+        else:
+            wanted = max(1, math.ceil(self.required_hours * 2))
+            allowed, deadline = max(0, wanted - math.ceil(round(self._delivered_hours * 2, 6))), self.ready_by
+        clipped, credit = clip_active_session(active_session, now_dt, allowed, deadline)
+        if credit:
+            if active_session.get("tier", SESSION_TIER_REQUIRED) == SESSION_TIER_OPPORTUNISTIC:
+                self._delivered_opportunistic_hours += credit
+            else:
+                self._delivered_hours += credit
+                self._count_if_short(round(credit * 2))
+        return clipped
+
+    def _fit_stored_sessions(self, now_dt: datetime) -> None:
+        """Make the stored plan respect the current settings without fresh prices.
+
+        With no price data the previous plan is replayed (an in-progress charge must not be
+        dropped just because a price source blinked -- issue #31), but replayed verbatim it would
+        ignore anything the user changes during the outage: lower the hours or pull the deadline
+        in and the old, longer plan would carry on. So the running block is clipped and the
+        upcoming ones trimmed to each tier's remaining allowance and deadline, exactly as a fresh
+        computation would have limited them.
+        """
+        self._accrue_delivered_hours(now_dt)
+        active, future = prune_and_classify(self._stored_sessions, now_dt)
+        active = self._clip_active_session(active, now_dt)
+        wanted = max(1, math.ceil(self.required_hours * 2))
+        limits = {
+            SESSION_TIER_REQUIRED: (
+                max(0, wanted - math.ceil(round(self._delivered_hours * 2, 6))),
+                self.ready_by,
+            ),
+            SESSION_TIER_OPPORTUNISTIC: (self._opportunistic_allowance_slots(), self.opportunistic_ready_by),
+        }
+        fitted = []
+        for tier, (allowed, deadline) in limits.items():
+            if active and active.get("tier", SESSION_TIER_REQUIRED) == tier:
+                start, end = parse_dt(active["start"]), parse_dt(active["end"])
+                allowed -= round((to_utc(end) - to_utc(start)).total_seconds() / 1800)
+            fitted += fit_future_sessions(
+                [s for s in future if s.get("tier", SESSION_TIER_REQUIRED) == tier], allowed, deadline
+            )
+        fitted.sort(key=lambda s: to_utc(parse_dt(s["start"])))
+        self._stored_sessions = ([active] if active else []) + fitted
 
     def _compute_sessions(self, all_prices: list[dict], now_dt: datetime) -> list[dict]:
         self._accrue_delivered_hours(now_dt)
         active_session, _ = prune_and_classify(self._stored_sessions, now_dt)
+        active_session = self._clip_active_session(active_session, now_dt)
         active_tier = active_session.get("tier", SESSION_TIER_REQUIRED) if active_session else None
 
         required_slots = max(1, math.ceil(self.required_hours * 2))
@@ -704,27 +938,25 @@ class WholesaleEvScheduleCoordinator(DataUpdateCoordinator[dict]):
                 # The active session's own remaining duration also counts
                 # toward what's still needed, on top of delivered_slots
                 # (which only covers sessions that have already fully ended).
-                duration_h = active_session.get("duration_hours")
-                if duration_h is None:
-                    end = parse_dt(active_session["end"])
-                    start = parse_dt(active_session["start"])
-                    duration_h = (end - start).total_seconds() / 3600
-                slots_still_needed = max(0, slots_still_needed - math.ceil(duration_h * 2))
+                slots_still_needed = max(0, slots_still_needed - session_slots(active_session))
 
         required_future_sessions = []
         required_future_dts: set = set()
         if slots_still_needed > 0:
+            # A short block already run, or running right now, has spent the one allowed.
+            short_spent = self._short_blocks_used >= 1 or (
+                active_tier == SESSION_TIER_REQUIRED and session_slots(active_session) < self._min_block_slots()
+            )
             required_future_slots = self._solve(
                 SESSION_TIER_REQUIRED,
                 candidate_slots,
                 slots_still_needed,
                 self.ready_by,
                 self.max_price,
+                avoid_short_block=short_spent,
             )
             required_future_dts = {s["date_time"] for s in required_future_slots}
-            required_future_sessions = slots_to_sessions(required_future_slots)
-        for s in required_future_sessions:
-            s["tier"] = SESSION_TIER_REQUIRED
+            required_future_sessions = self._sessions_from_slots(required_future_slots, SESSION_TIER_REQUIRED)
         if active_session and active_tier == SESSION_TIER_REQUIRED:
             active_session["tier"] = SESSION_TIER_REQUIRED
 
@@ -732,7 +964,9 @@ class WholesaleEvScheduleCoordinator(DataUpdateCoordinator[dict]):
             candidate_slots, required_future_dts, active_session, active_tier, now_dt
         )
 
-        return ([active_session] if active_session else []) + required_future_sessions + opportunistic_sessions
+        # Built tier by tier, but reported in the order they will happen.
+        upcoming = sorted(required_future_sessions + opportunistic_sessions, key=lambda s: to_utc(parse_dt(s["start"])))
+        return ([active_session] if active_session else []) + upcoming
 
     def _solve(
         self,
@@ -741,6 +975,7 @@ class WholesaleEvScheduleCoordinator(DataUpdateCoordinator[dict]):
         required_slots: int,
         ready_by: datetime,
         max_price: float,
+        avoid_short_block: bool = False,
     ) -> list[dict]:
         """find_optimal_slots, skipped when nothing it reads has changed since this
         tier's previous call (issue #60).
@@ -762,6 +997,7 @@ class WholesaleEvScheduleCoordinator(DataUpdateCoordinator[dict]):
             self.min_block_hours,
             max_price,
             self.optimization_algorithm,
+            avoid_short_block,
             tuple((s["date_time"], s["raw_price"], s["effective_price"], s["tier"]) for s in candidate_slots),
         )
         cached = self._solve_cache.get(tier)
@@ -774,9 +1010,25 @@ class WholesaleEvScheduleCoordinator(DataUpdateCoordinator[dict]):
             self.min_block_hours,
             max_price=max_price,
             algorithm=self.optimization_algorithm,
+            avoid_short_block=avoid_short_block,
         )
         self._solve_cache[tier] = (key, frozenset(s["date_time"] for s in result))
         return result
+
+    @staticmethod
+    def _sessions_from_slots(slots: list[dict], tier: str) -> list[dict]:
+        """Group selected slots into sessions tagged with their tier.
+
+        All scheduling arithmetic is done on UTC instants (see scheduler.to_utc), but the
+        schedule the user sees -- and the one persisted -- has always carried Home
+        Assistant's local UTC offset, so start/end are rendered back into local time here.
+        """
+        sessions = slots_to_sessions(slots)
+        for session in sessions:
+            session["tier"] = tier
+            for key in ("start", "end"):
+                session[key] = dt_util.as_local(parse_dt(session[key])).isoformat()
+        return sessions
 
     def _compute_opportunistic_sessions(
         self,
@@ -810,12 +1062,7 @@ class WholesaleEvScheduleCoordinator(DataUpdateCoordinator[dict]):
 
         opp_candidate_slots = candidate_slots
         if active_session and active_tier == SESSION_TIER_OPPORTUNISTIC:
-            duration_h = active_session.get("duration_hours")
-            if duration_h is None:
-                end = parse_dt(active_session["end"])
-                start = parse_dt(active_session["start"])
-                duration_h = (end - start).total_seconds() / 3600
-            opp_slots_still_needed = max(0, opp_slots_still_needed - math.ceil(duration_h * 2))
+            opp_slots_still_needed = max(0, opp_slots_still_needed - session_slots(active_session))
 
         if opp_slots_still_needed <= 0:
             return []
@@ -828,10 +1075,7 @@ class WholesaleEvScheduleCoordinator(DataUpdateCoordinator[dict]):
             self.opportunistic_ready_by,
             self.opportunistic_max_price,
         )
-        opportunistic_sessions = slots_to_sessions(opp_slots)
-        for s in opportunistic_sessions:
-            s["tier"] = SESSION_TIER_OPPORTUNISTIC
-        return opportunistic_sessions
+        return self._sessions_from_slots(opp_slots, SESSION_TIER_OPPORTUNISTIC)
 
     async def _async_recalculate(self) -> None:
         """Refresh in response to a user/automation edit, surfacing STATE_CALCULATING
@@ -873,7 +1117,7 @@ class WholesaleEvScheduleCoordinator(DataUpdateCoordinator[dict]):
         all_prices = self._collect_prices()
         price_summary = summarize_prices(all_prices, now_dt)
 
-        if self._boost_end and self._boost_end > now_dt:
+        if self._boost_end and to_utc(self._boost_end) > to_utc(now_dt):
             return self._boosting_result(now_dt, price_summary)
         if self._boost_end:
             self._boost_end = None
@@ -882,13 +1126,20 @@ class WholesaleEvScheduleCoordinator(DataUpdateCoordinator[dict]):
         # rolls forward to the next self._default_ready_by_hour automatically,
         # so "charge N hours by 7am" is a standing target rather than
         # something that needs resetting by hand every day.
-        if self.ready_by is None or self.ready_by <= now_dt:
+        if self.ready_by is None or to_utc(self.ready_by) <= to_utc(now_dt):
+            # Credit anything that has just finished to the cycle it belongs to BEFORE the
+            # counters reset. A session that ends exactly at ready_by (the cheapest window
+            # often runs right up to the deadline) is first seen as ended on this very
+            # refresh; crediting it after the reset would count it toward the NEW cycle
+            # and the next requirement would read as already delivered -- no charging
+            # at all on alternate days.
+            self._accrue_delivered_hours(now_dt)
             self.ready_by = next_ready_by(now_dt, self._default_ready_by_hour, self._default_ready_by_day_offset)
             # A new ready_by cycle is a fresh "charge N hours by this deadline"
             # request -- hours delivered toward the previous deadline don't
             # carry over and offset the next one (see issue: hours_remaining
             # bouncing back up after a completed overnight session).
-            self._delivered_hours = 0.0
+            self._reset_required_progress()
             # opportunistic_ready_by always re-derives here, every time
             # required ready_by rolls forward -- this is the ONE place a live
             # edit to it (via async_set_opportunistic_ready_by) gets
@@ -896,7 +1147,7 @@ class WholesaleEvScheduleCoordinator(DataUpdateCoordinator[dict]):
             # override, not a permanent switch to independence -- "unless
             # it's been hand-modified, it always just +N days" holds for
             # exactly one required-ready_by cycle at a time.
-            self.opportunistic_ready_by = self.ready_by + timedelta(days=self._default_opportunistic_offset_days)
+            self.opportunistic_ready_by = add_local_days(self.ready_by, self._default_opportunistic_offset_days)
             self._delivered_opportunistic_hours = 0.0
             await self._async_save_stored_state()
 
@@ -906,6 +1157,10 @@ class WholesaleEvScheduleCoordinator(DataUpdateCoordinator[dict]):
             return self._idle_result(now_dt, price_summary)
 
         if not all_prices:
+            # Nothing to recompute from, so the stored plan stands in for one -- but it must still
+            # respect what the user has asked for since it was made.
+            self._fit_stored_sessions(now_dt)
+            await self._async_save_stored_state()
             return self._error_result("No price data available from configured entities", now_dt, price_summary)
 
         sessions = self._compute_sessions(all_prices, now_dt)
@@ -1020,7 +1275,9 @@ class WholesaleEvScheduleCoordinator(DataUpdateCoordinator[dict]):
         time than required, then not enough price data published yet before
         ready_by, falling back to the tolerances only once both of those are ruled
         out -- see issue #26 (this used to always blame tolerances regardless)."""
-        hours_until_ready_by = max(0.0, (self.ready_by - now_dt).total_seconds() / 3600) if self.ready_by else 0.0
+        hours_until_ready_by = (
+            max(0.0, (to_utc(self.ready_by) - to_utc(now_dt)).total_seconds() / 3600) if self.ready_by else 0.0
+        )
         if self.required_hours > hours_until_ready_by:
             ready_by_label = self.ready_by.isoformat() if self.ready_by else "unset"
             return (
@@ -1030,7 +1287,8 @@ class WholesaleEvScheduleCoordinator(DataUpdateCoordinator[dict]):
 
         required_slots = max(1, math.ceil(self.required_hours * 2))
         if self.ready_by:
-            eligible_count = sum(1 for p in all_prices if p["date_time"] + timedelta(minutes=30) <= self.ready_by)
+            deadline = to_utc(self.ready_by)
+            eligible_count = sum(1 for p in all_prices if to_utc(p["date_time"]) + timedelta(minutes=30) <= deadline)
         else:
             eligible_count = len(all_prices)
         if eligible_count < required_slots:
@@ -1062,7 +1320,9 @@ class WholesaleEvScheduleCoordinator(DataUpdateCoordinator[dict]):
                     "sessions": [],
                     "active_slot": None,
                     "next_slot": None,
-                    "hours_remaining": self.required_hours,
+                    # What is still outstanding -- not the full requirement again when part of
+                    # it has already been delivered.
+                    "hours_remaining": max(0.0, self.required_hours - self._delivered_hours),
                     "error_reason": reason,
                     "calculated_at": now_dt.isoformat(),
                     **self._opportunistic_diagnostics(sessions, now_dt),

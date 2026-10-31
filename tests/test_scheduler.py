@@ -615,7 +615,10 @@ def test_find_optimal_slots_optimal_and_hybrid_produce_a_valid_schedule_for_disj
 
     result_dts = {s["date_time"] for s in result}
     assert len(result_dts) == 3
-    assert result_dts == {run_a[0]["date_time"], run_a[1]["date_time"], run_b[0]["date_time"]}
+    # The cheaper run in full, plus ONE slot of the other. Both slots of run_b cost the same, so
+    # which one is a tie-break rather than part of the contract.
+    assert {run_a[0]["date_time"], run_a[1]["date_time"]} <= result_dts
+    assert len(result_dts & {run_b[0]["date_time"], run_b[1]["date_time"]}) == 1
 
 
 @pytest.mark.parametrize("algorithm", ["optimal", "hybrid"])

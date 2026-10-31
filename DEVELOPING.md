@@ -11,7 +11,10 @@ conventions this file doesn't repeat.
 custom_components/wholesale_ev_schedule/
   scheduler.py      pure scheduling algorithm, no HA dependency
   coordinator.py    reads price/charger entities, runs scheduler.py, persists state
-  providers.py      registry of known price-source shapes (Octopus Energy, AgilePredict)
+  providers.py      registry of known price-source shapes (Octopus Energy, AgilePredict,
+                    Agile Rates API) for the rates, forecast and short-range forecast slots
+  price_parsing.py  pure helpers for reading price points out of attributes (dotted key
+                    paths, estimate flags) -- no HA dependency, like scheduler.py
   config_flow.py    multi-step setup + options: name, poll interval, providers
   entity.py         shared base — forces the <prefix>_ entity_id namespace
   sensor.py         primary + diagnostic (hidden-by-default) output sensors
@@ -54,24 +57,69 @@ custom_components/wholesale_ev_schedule/
   `_min_max_slots_per_block` and `_solve_with_per_run_costs`; added for #55
   (greedy can lose to a combination — often one larger window — whose
   combined total is cheaper than picking the single cheapest window first).
-- **Top-ups are validated, never "cheapest individual slots".** When whole blocks
-  can't make up the full requirement, the remainder is filled by `_best_topup`
-  (used by greedy and the DP algorithms): slots grown outward from the existing
-  blocks plus at most one contiguous window elsewhere, then checked on the blocks
-  they actually produce (≤1 block under `min_block_hours`, every block's average
-  ≤ `max_price`). The earlier version picked the cheapest leftover slots
-  independently, which scattered single 30-minute slots and ignored `max_price`
-  (found on a live install; pinned by `tests/test_block_and_price_constraints.py`).
-  Related: with a `max_price` and no `max_block_hours`, `_min_cost_for_run` tracks
-  real block length (bounded by the requested slot count) instead of collapsing
-  all "free" lengths into one state, because the cap is a whole-block average.
-- **`calculating` is a display-only state (`STATE_CALCULATING`).** `_async_recalculate`
-  (`coordinator.py`) wraps every user-edit refresh: it sets a flag, pushes listeners
-  so the state sensor reads `calculating`, then refreshes. The flag is cleared in a
-  `finally` inside `_async_update_data`, not after `async_refresh` returns, because
-  the coordinator notifies listeners at the end of `async_refresh`. It lives on the
-  sensor (`native_value`), not in `data["state"]`, so `scheduler.determine_state`
-  stays pure and `charging_desired` is untouched while it's showing.
+- **The "last block may be short" relaxation is exact in `optimal`/`hybrid`, validated in
+  `greedy`.** The rules (`tests/oracle.py`): exactly `required` slots, all ending by
+  `ready_by`, all inside a contiguous run long enough to hold a minimum block, at most ONE
+  maximal group shorter than `min_block_hours` (wherever it falls), and every group's average
+  *raw* price within `max_price`. The DP algorithms build that allowance into the state
+  (`_min_cost_for_run` carries a "short block used" flag; `_solve_with_per_run_costs` is a
+  knapsack over runs with that flag), so they are exact -- proven against exhaustive
+  enumeration on tens of thousands of random markets (`tests/test_scheduler_oracle.py`). An
+  earlier version chose the cheapest full blocks first and then bolted on a top-up, which is
+  not exact: the best answer can use a dearer full block precisely so a lone cheap slot
+  elsewhere can be the short one (it lost to the true optimum on ~1% of small markets).
+  `greedy` can't do that, so it still fills a remainder with `_best_topup` (slots grown from
+  existing blocks plus at most one contiguous window, validated on the blocks they produce);
+  the original version picked the cheapest *individual* leftover slots, which scattered
+  1-slot blocks and ignored `max_price` (found on a live install, pinned by
+  `tests/test_block_and_price_constraints.py`). Related: with a `max_price` and no
+  `max_block_hours`, `_min_cost_for_run` tracks real block length (bounded by the requested
+  slot count) instead of collapsing all "free" lengths into one state, because the cap is a
+  whole-block average. `hybrid` currently returns the same answers as `optimal` (its
+  per-run size restriction turned out to bind only on `max_block_hours`, where it was a bug:
+  a block cap bounds each *block*, not how many blocks a run can hold).
+- **All scheduling arithmetic is on UTC instants.** Python compares and subtracts two aware
+  datetimes that share a tzinfo by *wall clock* and keys the repeated autumn hour as one entry,
+  so slots built from local times lost or mis-measured time across a clock change (the 25-hour
+  day dropped two slots, runs split at the change, durations were off by an hour). `scheduler.to_utc`
+  is the single conversion; the coordinator ingests prices as UTC and `_sessions_from_slots`
+  renders session start/end back into local time, so what is shown and persisted still carries the
+  local offset. `tests/test_scheduler_dst.py` builds slots from real `ZoneInfo` datetimes.
+- **Rollover credits before it resets.** `_accrue_delivered_hours` runs *before* the `ready_by`
+  rollover zeroes the counters and consumes what it counts (idempotent). A session ending exactly
+  at `ready_by` is first seen as ended on the rollover refresh; crediting it afterwards counted it
+  toward the new cycle and the next requirement read as already delivered (no charging on
+  alternate days). Pinned in `tests/test_sim_scenarios.py`.
+- **An in-progress block follows what the user changes.** Sessions are planned once and carried
+  forward while they run, so `clip_active_session` (running block) and `fit_future_sessions`
+  (upcoming, used when prices are unavailable and the stored plan stands in) cut them to the tier's
+  remaining allowance and deadline. Only *whole slots that ran* are credited on an early stop: a
+  part-slot would be rounded up by the delivered-hours accounting and leave the car short. Setting
+  the required hours is still a deliberate *fresh request* (delivered hours do not carry over).
+- **One short block per request, remembered across re-plans.** Every re-plan solves only the
+  remainder, so without memory each short block that ran earned a fresh allowance and a day could
+  contain several (the min block exists to stop charger cycling). `_short_blocks_used` counts
+  finished required blocks shorter than the minimum (persisted, reset with `_reset_required_progress`)
+  and `find_optimal_slots(avoid_short_block=True)` then prefers a schedule needing none, falling
+  back only if there is no other. `tests/test_sim_cost_quality.py` compares what was paid with the
+  brute-force optimum and checks at most one short block actually runs per request.
+- **Risk adjustment is sign-aware.** `compute_effective_price` divides a doubtful *positive* price
+  by its credibility but multiplies a *negative* one, otherwise a forecast -5p looks better than a
+  real -5p ("plunge pricing").
+- **Non-half-hourly feeds are normalised.** `price_parsing.normalize_to_half_hours` turns a regular
+  hourly feed into two slots per point and averages regular 15/10/5-minute feeds into half hours;
+  half-hourly and irregular feeds are untouched (needs 4+ points and >=80% regular gaps, and it
+  never invents prices across a hole).
+- **Stored state is sanitised on load.** `_parse_stored_float` rejects non-finite/non-numeric/boolean
+  values and clamps to the *same* ranges the number entities enforce (`const.RANGE_*`, one
+  definition); dates are bounded, sessions must be plausible, enums are checked with `isinstance`
+  first (a stored list is unhashable), and session lengths always come from start/end
+  (`session_slots`), never the display field. A NaN/inf previously left the entry stuck in
+  `setup_retry`. `tests/test_stored_state.py` is the matrix.
+- **Removing an instance deletes its stored state** (`async_remove_entry`; the key is built by
+  `coordinator.stored_state` so create and delete cannot drift).
+- **`next_slot` is the earliest upcoming session** across both tiers (`prune_and_classify` returns
+  futures in time order, sorted on instants so it holds across a clock change).
 - **There's no live `max_block_hours` entity** — it was removed as an
   unnecessary second knob (it only ever capped window *selection* size
   without guaranteeing an actual rest period; genuine multi-block scheduling
@@ -194,7 +242,7 @@ the attribute/key names and multiplier directly.
 
 ## Testing
 
-All tests run inside Docker (`public.ecr.aws/docker/library/python:trixie`):
+All tests run inside Docker (`python:trixie` from Docker Hub), in parallel (`-n auto`, via pytest-xdist; use `-n 0` to debug one test):
 
 ```bash
 ./run-tests.sh              # run tests
@@ -207,6 +255,10 @@ What each test file covers:
 - `tests/test_block_and_price_constraints.py` — min-block and max_price as guarantees on the returned schedule, across all three algorithms, plus seeded randomised invariants.  Guards the top-up step: remainders must be one contiguous, under-`max_price` window, never scattered single slots
 - `tests/test_calculating_state.py` — the state sensor shows `calculating` mid-recompute for every user-edit path (not periodic refreshes), never flips `charging_desired`, and always clears, even if the refresh fails
 - `tests/test_solve_cache.py` — the solve memo: unchanged refreshes/minute ticks don't re-solve, every input that can change the answer (settings, prices, slot boundary, per-slot fields) forces one, opportunistic-only edits re-solve only that tier, and a seeded random sequence of edits/clock moves always equals an uncached recompute
+- `tests/test_price_parsing_helpers.py` — pure unit tests for `price_parsing.py`: dotted-path resolution (literal-key-wins, malformed/non-mapping/empty-segment inputs, read-only mappings, falsy values) and the conservative estimate-flag interpretation
+- `tests/test_short_range_scheduler.py` — pure scheduler coverage for the short-range tier: the full source-precedence matrix in both input orders, ties, unknown sources, per-slot coverage gaps, the credibility override and its clamping, `estimated`/`confidence` on sessions, and end-to-end ranking with every algorithm
+- `tests/test_short_range_forecast.py` — coordinator-level behaviour against a real entry: entries that never opted in are untouched (incl. stale keys), parsing of the real Agile Rates API shape and every malformed-row case, DST 23/25-hour days (the 25-hour autumn merge is a strict `xfail` for a pre-existing, provider-independent dedupe bug), precedence over the real feeds, what gets scheduled (including the 10:00 -> 16:00 estimate->final transition), fallback when the entity vanishes, the opportunistic tier, diagnostics, and solve-cache interplay
+- `tests/test_short_range_config_flow.py` — the new dropdown/steps/validation, routing with the other providers, the options-flow guarantees for existing installs (re-saving untouched changes nothing else; opting in/out; switching provider clears the old flag key; the #38-style stale-`None` entity), legacy option shapes of every era still setting up, and a structural check that every step/field has strings in both `strings.json` and `translations/en.json`
 - `tests/test_optimization_algorithm.py` — the optimization_algorithm select entity: default value, persistence via the select entity, survival across restarts, an invalid stored value degrading to greedy, reset restoring the default
 - `tests/test_integration_smoke.py` — full config/options flow, entity registration, idle vs error state on a fresh setup given the new defaults
 - `tests/test_providers.py` — custom rates/forecast provider branches, "no forecast" branch, blank custom attribute/key fields rejected, re-enabling forecast after "none"
@@ -228,6 +280,12 @@ What each test file covers:
 - `tests/test_opportunistic_ready_by_rollover.py` — opportunistic_ready_by defaulting to ready_by + offset, a manual edit holding only until the next required-ready_by rollover, rolling forward correctly across several rollovers, and a manual edit to required ready_by NOT itself perturbing opportunistic_ready_by
 - `tests/test_opportunistic_lifecycle.py` — Stop zeroes the opportunistic target but keeps tuning preferences/deadline; Reset restores opportunistic defaults and re-derives opportunistic_ready_by immediately (not left unset until the next natural rollover); opportunistic state survives a genuine restart; a pre-opportunistic stored session with no "tier" key defaults to the required counter on upgrade
 - `tests/test_opportunistic_reconfigure.py` — enabling/disabling opportunistic charging via the actual options-flow UI walk adds/removes exactly the opportunistic entities, and a direct options update takes effect after reload
+- `tests/sim.py` + `tests/test_sim_*.py` — **the simulator**. `Sim` runs the real integration through simulated days: a seeded `PriceWorld` (Agile rates published ~15:00Z for the next day, a forecast whose error grows with horizon, day-ahead estimates that firm up), any feed layout (`Shape`), HA timezone, outages, restarts (`sim.restart()` builds a brand-new coordinator from storage), user actions (`sim.act(...)`) and a notional charger, and calls `check_invariants` after every step (sorted non-overlapping sessions, state/desired/override consistency, never over-committed, deadline and price cap respected, next/active slot match the list, a fresh plan respects the minimum block, delivered hours monotonic, stored state serialisable). Scenario files: `test_sim_scenarios.py` (daily cycles in 11 timezones across clock changes; deadline hours in the DST gap/fold; the rollover regression), `test_sim_restart.py` (a restart changes nothing, at every step), `test_sim_user_actions.py` (hours/deadline/cap/override/boost/stop/reset mid-run, in-progress blocks), `test_sim_feeds.py` (source strategies, publication timing, outages incl. edits during an outage), `test_sim_opportunistic.py`, `test_sim_reconfigure.py` (options changes on a running install), `test_sim_cost_quality.py` (paid vs the brute-force optimum; at most one short block runs), and `test_sim_chaos.py` (seeded random everything; a failure prints the seed and last actions -- replay it, then write a focused test).
+- `tests/oracle.py` + `tests/test_scheduler_oracle.py` — an exhaustive brute-force reference for slot selection (enumerates every subset, keeps valid ones, takes the cheapest). `optimal` must equal it exactly, nothing may ever return an invalid schedule, greedy/hybrid may never beat it, and `avoid_short_block` is checked against its `max_short=0` variant. Verified at 30,000 random markets during development; CI runs ~1,000.
+- `tests/test_scheduler_dst.py`, `tests/test_next_ready_by_sweep.py` — pure scheduler functions with real `ZoneInfo` datetimes across London/New York/Sydney/Lord Howe clock changes; `next_ready_by` swept over eight zones x every half hour x eight hours x three offsets
+- `tests/test_clip_active_session.py`, `tests/test_session_ordering.py`, `tests/test_scheduler_pricing_edges.py`, `tests/test_price_grid.py` — pure unit tests for block clipping/fitting, chronological sessions, negative/zero/huge prices, and the 30-minute-grid normaliser
+- `tests/test_stored_state.py` — every stored field x garbage / non-finite / out-of-range / wrong type; extreme dates; implausible sessions; lossless round trip
+- `tests/test_entity_contracts.py`, `tests/test_instances.py`, `tests/test_config_matrix.py`, `tests/test_price_formats.py`, `tests/test_registry_and_hygiene.py` — entities through real service calls and the attribute contract in every state; multi-instance isolation and removal cleanup; all 72 provider combinations created via the real config flow and fed their own data layout (asserting each configured source actually contributed); timestamp/number/ordering/granularity robustness; provider-registry and release-hygiene guards
 
 ## Linting and security scanning
 
@@ -263,8 +321,11 @@ without it, every run would pip-install the entire
 `pytest-homeassistant-custom-component` dependency tree from scratch, since
 GitHub-hosted runners start with no Docker layer cache. With it, only a
 `requirements-*.txt` change actually triggers a real rebuild. `runs-on:
-ubuntu-latest` is already GitHub's smallest/cheapest hosted runner — there's
-no smaller tier to drop to.
+ubuntu-latest` is GitHub's standard hosted runner. The test suite is large
+(thousands of simulated-day tests) and runs in parallel with pytest-xdist
+(`-n auto --maxprocesses=4` in `pytest.ini`), so it scales with the runner's
+cores: keep the repository's runner size at the default (Settings → Actions →
+Runners) rather than shrinking it.
 
 `release` depends on `checks` and publishes a GitHub release (zipping
 `custom_components/wholesale_ev_schedule/`) whenever `manifest.json`'s
@@ -295,7 +356,7 @@ no manifest changes needed. To regenerate after editing the SVG:
 
 ```bash
 docker run --rm -v "$(pwd)/custom_components/wholesale_ev_schedule:/work" \
-  public.ecr.aws/docker/library/python:trixie \
+  python:trixie \
   bash -c "apt-get update -qq && apt-get install -y -qq librsvg2-bin && \
     rsvg-convert -w 256 -h 256 /work/logo.svg -o /work/brand/icon.png && \
     rsvg-convert -w 512 -h 512 /work/logo.svg -o /work/brand/icon@2x.png && \

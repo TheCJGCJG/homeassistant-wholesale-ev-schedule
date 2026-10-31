@@ -456,7 +456,8 @@ class EvChargingAveragePriceAllDataSensor(_DiagnosticSensor):
 
 class EvChargingPriceDataSourcesSensor(_DiagnosticSensor):
     """State is the total candidate price point count; attributes break that
-    down by source (current_actual / next_actual / predicted) — "sources used"."""
+    down by source (current_actual / next_actual / predicted, plus short_range /
+    short_range_final when a short-range forecast is configured) — "sources used"."""
 
     _attr_translation_key = "price_data_sources"
     _attr_icon = "mdi:database"
@@ -474,9 +475,10 @@ class EvChargingPriceDataSourcesSensor(_DiagnosticSensor):
 
 
 class EvChargingActiveProvidersSensor(_DiagnosticSensor):
-    """Which named provider (see providers.py) supplies rates and forecast
-    data for this instance — set once at config time, shown here for
-    visibility without needing to inspect the integration's configuration."""
+    """Which named provider (see providers.py) supplies rates, forecast and (if
+    configured) short-range forecast data for this instance — set once at config
+    time, shown here for visibility without needing to inspect the integration's
+    configuration."""
 
     _attr_translation_key = "active_providers"
     _attr_icon = "mdi:api"
@@ -486,11 +488,21 @@ class EvChargingActiveProvidersSensor(_DiagnosticSensor):
 
     @property
     def native_value(self) -> str:
-        return f"{self.coordinator.rates_provider_label} / {self.coordinator.forecast_provider_label}"
+        labels = [
+            self.coordinator.rates_provider_label,
+            self.coordinator.forecast_provider_label,
+            # Left out entirely unless configured, so the state (and any automation
+            # matching on it) is unchanged for an install that never opted in.
+            self.coordinator.short_range_provider_label,
+        ]
+        return " / ".join(label for label in labels if label)
 
     @property
     def extra_state_attributes(self) -> dict:
-        return {
+        attributes = {
             "rates_provider": self.coordinator.rates_provider_label,
             "forecast_provider": self.coordinator.forecast_provider_label,
         }
+        if short_range := self.coordinator.short_range_provider_label:
+            attributes["short_range_provider"] = short_range
+        return attributes

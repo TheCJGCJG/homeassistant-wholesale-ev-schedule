@@ -2,7 +2,7 @@
 in tests without repeating the full options dict or walking the whole config
 flow everywhere."""
 
-from datetime import datetime, timedelta
+from datetime import UTC, datetime, timedelta
 
 from homeassistant.const import CONF_NAME
 from homeassistant.util import slugify
@@ -32,6 +32,14 @@ from custom_components.wholesale_ev_schedule.const import (
     CONF_RATE_VALUE_KEY,
     CONF_RATES_ATTRIBUTE,
     CONF_RATES_PROVIDER,
+    CONF_SHORT_RANGE_ATTRIBUTE,
+    CONF_SHORT_RANGE_CONFIDENCE,
+    CONF_SHORT_RANGE_DATETIME_KEY,
+    CONF_SHORT_RANGE_ENTITY,
+    CONF_SHORT_RANGE_ESTIMATE_FLAG_KEY,
+    CONF_SHORT_RANGE_PRICE_KEY,
+    CONF_SHORT_RANGE_PROVIDER,
+    CONF_SHORT_RANGE_UNIT_MULTIPLIER,
     CONF_UPDATE_INTERVAL_MINUTES,
     DEFAULT_ENABLE_OPPORTUNISTIC_CHARGING,
     DEFAULT_GAMBLE_TOLERANCE,
@@ -44,6 +52,7 @@ from custom_components.wholesale_ev_schedule.const import (
     DEFAULT_READY_BY_DAY_OFFSET,
     DEFAULT_READY_BY_HOUR,
     DEFAULT_REQUIRED_HOURS,
+    DEFAULT_SHORT_RANGE_CONFIDENCE,
     DEFAULT_UPDATE_INTERVAL_MINUTES,
     DOMAIN,
 )
@@ -52,6 +61,8 @@ from custom_components.wholesale_ev_schedule.providers import (
     FORECAST_PROVIDERS,
     RATE_PROVIDER_OCTOPUS_ENERGY,
     RATE_PROVIDERS,
+    SHORT_RANGE_PROVIDER_AGILE_RATES_API,
+    SHORT_RANGE_PROVIDERS,
 )
 
 CURRENT_RATES_ENTITY = "event.octopus_energy_electricity_current_day_rates"
@@ -253,3 +264,66 @@ async def async_setup_wholesale_entry(hass, options: dict | None = None, name: s
     assert await hass.config_entries.async_setup(entry.entry_id)
     await hass.async_block_till_done()
     return entry
+
+
+# ---------------------------------------------------------------------------
+# Short-range forecast (issue #54)
+# ---------------------------------------------------------------------------
+
+SHORT_RANGE_ENTITY = "sensor.agile_rates_api_data"
+
+_agile_rates_api_profile = SHORT_RANGE_PROVIDERS[SHORT_RANGE_PROVIDER_AGILE_RATES_API]
+
+
+def short_range_options(base: dict | None = None, **overrides) -> dict:
+    """`base` (default FULL_OPTIONS) with the Agile Rates API short-range forecast
+    configured exactly as the config flow would resolve it; `overrides` replace any
+    key afterwards. FULL_OPTIONS itself is deliberately left without any short-range
+    keys: it doubles as the shape of every entry created before the feature."""
+    return {
+        **(base if base is not None else FULL_OPTIONS),
+        CONF_SHORT_RANGE_PROVIDER: SHORT_RANGE_PROVIDER_AGILE_RATES_API,
+        CONF_SHORT_RANGE_ENTITY: SHORT_RANGE_ENTITY,
+        CONF_SHORT_RANGE_ATTRIBUTE: _agile_rates_api_profile["attribute"],
+        CONF_SHORT_RANGE_DATETIME_KEY: _agile_rates_api_profile["datetime_key"],
+        CONF_SHORT_RANGE_PRICE_KEY: _agile_rates_api_profile["price_key"],
+        CONF_SHORT_RANGE_UNIT_MULTIPLIER: _agile_rates_api_profile["unit_multiplier"],
+        CONF_SHORT_RANGE_ESTIMATE_FLAG_KEY: _agile_rates_api_profile["estimate_flag_key"],
+        CONF_SHORT_RANGE_CONFIDENCE: DEFAULT_SHORT_RANGE_CONFIDENCE,
+        **overrides,
+    }
+
+
+def agile_rates_points(start: datetime, prices: list[float], prediction: bool | list[bool] = True) -> list[dict]:
+    """`rates` attribute entries shaped like the Agile Rates API REST sensor
+    (https://agilerates.uk/api/): UTC "Z" timestamps and the rate nested under
+    agileRate.result. `prediction` is one flag for every slot, or one per slot."""
+    flags = prediction if isinstance(prediction, list) else [prediction] * len(prices)
+    assert len(flags) == len(prices)
+
+    def iso(dt: datetime) -> str:
+        return dt.astimezone(UTC).strftime("%Y-%m-%dT%H:%M:%SZ")
+
+    return [
+        {
+            "deliveryStart": iso(start + timedelta(minutes=30 * i)),
+            "deliveryEnd": iso(start + timedelta(minutes=30 * (i + 1))),
+            "agileRate": {
+                "result": {"source": "epexspot_GB_GB", "prediction": flags[i], "rate": price},
+                "sources": {},
+            },
+        }
+        for i, price in enumerate(prices)
+    ]
+
+
+def agile_predict_points(start: datetime, prices: list[float]) -> list[dict]:
+    """`prices` attribute entries shaped like AgilePredict / Agile Forecast."""
+    return [
+        {"date_time": (start + timedelta(minutes=30 * i)).isoformat(), "agile_pred": price}
+        for i, price in enumerate(prices)
+    ]
+
+
+def set_short_range_entity(hass, points, entity_id: str = SHORT_RANGE_ENTITY, attribute: str = "rates") -> None:
+    hass.states.async_set(entity_id, "ok", {attribute: points})

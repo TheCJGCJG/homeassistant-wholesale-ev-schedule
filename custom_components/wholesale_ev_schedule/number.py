@@ -7,7 +7,15 @@ from homeassistant.config_entries import ConfigEntry
 from homeassistant.core import HomeAssistant
 from homeassistant.helpers.entity_platform import AddEntitiesCallback
 
-from .const import CONF_ENABLE_OPPORTUNISTIC_CHARGING, DOMAIN
+from .const import (
+    CONF_ENABLE_OPPORTUNISTIC_CHARGING,
+    DOMAIN,
+    MAX_BOOST_HOURS,
+    RANGE_HOURS,
+    RANGE_KWH,
+    RANGE_PERCENT,
+    RANGE_PRICE,
+)
 from .coordinator import WholesaleEvScheduleCoordinator
 from .entity import WholesaleEvScheduleEntity
 
@@ -35,8 +43,8 @@ class EvChargingHoursRequiredNumber(WholesaleEvScheduleEntity, NumberEntity):
 
     _attr_translation_key = "charging_hours_required"
     _attr_icon = "mdi:ev-station"
-    _attr_native_min_value = 0.0
-    _attr_native_max_value = 24.0
+    _attr_native_min_value = RANGE_HOURS[0]
+    _attr_native_max_value = RANGE_HOURS[1]
     _attr_native_step = 0.5
     _attr_native_unit_of_measurement = "h"
     _attr_mode = NumberMode.BOX
@@ -61,7 +69,7 @@ class EvChargingBoostDurationNumber(WholesaleEvScheduleEntity, NumberEntity):
     _attr_translation_key = "boost_duration_hours"
     _attr_icon = "mdi:lightning-bolt"
     _attr_native_min_value = 0.0
-    _attr_native_max_value = 8.0
+    _attr_native_max_value = MAX_BOOST_HOURS
     _attr_native_step = 0.5
     _attr_native_unit_of_measurement = "h"
     _attr_mode = NumberMode.SLIDER
@@ -83,8 +91,8 @@ class EvChargingGambleToleranceNumber(WholesaleEvScheduleEntity, NumberEntity):
 
     _attr_translation_key = "gamble_tolerance"
     _attr_icon = "mdi:dice-multiple"
-    _attr_native_min_value = 0.0
-    _attr_native_max_value = 100.0
+    _attr_native_min_value = RANGE_PERCENT[0]
+    _attr_native_max_value = RANGE_PERCENT[1]
     _attr_native_step = 5.0
     _attr_native_unit_of_measurement = "%"
     _attr_mode = NumberMode.SLIDER
@@ -106,8 +114,8 @@ class EvChargingMinBlockHoursNumber(WholesaleEvScheduleEntity, NumberEntity):
 
     _attr_translation_key = "min_block_hours"
     _attr_icon = "mdi:timer-outline"
-    _attr_native_min_value = 0.0
-    _attr_native_max_value = 24.0
+    _attr_native_min_value = RANGE_HOURS[0]
+    _attr_native_max_value = RANGE_HOURS[1]
     _attr_native_step = 0.5
     _attr_native_unit_of_measurement = "h"
     _attr_mode = NumberMode.BOX
@@ -129,8 +137,8 @@ class EvChargingMaxPriceNumber(WholesaleEvScheduleEntity, NumberEntity):
 
     _attr_translation_key = "max_price"
     _attr_icon = "mdi:cash"
-    _attr_native_min_value = 0.0
-    _attr_native_max_value = 200.0
+    _attr_native_min_value = RANGE_PRICE[0]
+    _attr_native_max_value = RANGE_PRICE[1]
     _attr_native_step = 1.0
     _attr_mode = NumberMode.BOX
 
@@ -153,8 +161,8 @@ class EvChargingAssumedChargeKwhNumber(WholesaleEvScheduleEntity, NumberEntity):
 
     _attr_translation_key = "assumed_charge_kwh"
     _attr_icon = "mdi:battery-charging"
-    _attr_native_min_value = 0.0
-    _attr_native_max_value = 150.0
+    _attr_native_min_value = RANGE_KWH[0]
+    _attr_native_max_value = RANGE_KWH[1]
     _attr_native_step = 0.5
     _attr_native_unit_of_measurement = "kWh"
     _attr_mode = NumberMode.BOX
@@ -178,8 +186,8 @@ class EvOpportunisticTargetHoursNumber(WholesaleEvScheduleEntity, NumberEntity):
 
     _attr_translation_key = "opportunistic_target_hours"
     _attr_icon = "mdi:battery-charging-high"
-    _attr_native_min_value = 0.0
-    _attr_native_max_value = 24.0
+    _attr_native_min_value = RANGE_HOURS[0]
+    _attr_native_max_value = RANGE_HOURS[1]
     _attr_native_step = 0.5
     _attr_native_unit_of_measurement = "h"
     _attr_mode = NumberMode.BOX
@@ -202,8 +210,8 @@ class EvOpportunisticMaxPriceNumber(WholesaleEvScheduleEntity, NumberEntity):
 
     _attr_translation_key = "opportunistic_max_price"
     _attr_icon = "mdi:cash-sync"
-    _attr_native_min_value = 0.0
-    _attr_native_max_value = 200.0
+    _attr_native_min_value = RANGE_PRICE[0]
+    _attr_native_max_value = RANGE_PRICE[1]
     _attr_native_step = 1.0
     _attr_mode = NumberMode.BOX
 

@@ -12,7 +12,12 @@ from homeassistant.const import CONF_NAME
 from homeassistant.data_entry_flow import FlowResultType
 from homeassistant.helpers import entity_registry as er
 
-from custom_components.wholesale_ev_schedule.const import DEFAULT_NAME, DOMAIN
+from custom_components.wholesale_ev_schedule.const import (
+    CONF_SHORT_RANGE_ENTITY,
+    CONF_SHORT_RANGE_PROVIDER,
+    DEFAULT_NAME,
+    DOMAIN,
+)
 
 from .factories import (
     BASE_INPUT,
@@ -39,7 +44,10 @@ async def test_config_flow_walks_all_steps_and_creates_entry(hass):
 
     result = await hass.config_entries.flow.async_configure(result["flow_id"], FORECAST_AGILE_PREDICT_INPUT)
     assert result["type"] == FlowResultType.CREATE_ENTRY
-    assert result["options"] == FULL_OPTIONS
+    # The only addition over FULL_OPTIONS (the shape every pre-short-range entry has) is
+    # the explicit "off" values for the optional short-range forecast -- same steps,
+    # same finish point, no new screen unless a short-range provider is chosen.
+    assert result["options"] == {**FULL_OPTIONS, CONF_SHORT_RANGE_PROVIDER: "none", CONF_SHORT_RANGE_ENTITY: None}
 
 
 async def test_options_flow_walks_all_steps_and_updates_entry(hass):

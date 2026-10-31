@@ -14,6 +14,34 @@ from datetime import UTC, datetime, timedelta
 
 _LOGGER = logging.getLogger(__name__)
 
+
+# Float noise from summing prices must not flip "average == max_price" into "over the cap", and
+# every cap comparison (greedy windows, the DP, top-ups) has to agree about it.
+_CAP_TOLERANCE = 1e-9
+
+
+def _within_cap(total: float, count: int, max_price: float) -> bool:
+    """Whether `count` slots whose raw prices sum to `total` average at or under max_price."""
+    return total / count <= max_price + _CAP_TOLERANCE
+
+
+def to_utc(dt: datetime) -> datetime:
+    """`dt` as an absolute UTC instant (naive datetimes are returned unchanged).
+
+    Every comparison, dictionary key and piece of arithmetic on a slot's time goes through
+    this. Python compares and subtracts two aware datetimes that share a tzinfo by their
+    *wall clock*, ignoring the UTC offset, and treats the repeated autumn hour as one key --
+    so local-time slots silently lose or mis-measure time across a DST change. UTC has no
+    such thing. Returning the very same object when it is already UTC keeps the common case
+    free.
+    """
+    tzinfo = dt.tzinfo
+    # Hot path: the coordinator already hands over UTC, and this runs thousands of times a refresh.
+    if tzinfo is UTC or tzinfo is None:
+        return dt
+    return dt.astimezone(UTC)
+
+
 # Mirrors const.py's OPTIMIZATION_ALGORITHM_* values, duplicated as plain string
 # literals rather than imported -- const.py pulls in homeassistant.const, which would
 # break this module's deliberate no-HA-dependency contract (see module docstring).
@@ -21,7 +49,34 @@ OPTIMIZATION_ALGORITHM_GREEDY = "greedy"
 OPTIMIZATION_ALGORITHM_OPTIMAL = "optimal"
 OPTIMIZATION_ALGORITHM_HYBRID = "hybrid"
 
+# Where a price slot came from. coordinator.py tags every slot with one of these;
+# nothing here knows or cares which entity or provider produced it.
+SOURCE_CURRENT_ACTUAL = "current_actual"
+SOURCE_NEXT_ACTUAL = "next_actual"
+# A short-range forecast's prices, split by the source's own per-point flag: an
+# estimate (still moving, e.g. a day-ahead auction not yet final) or final (the
+# source says it will not change -- treated as actual-grade).
+SOURCE_SHORT_RANGE = "short_range"
+SOURCE_SHORT_RANGE_FINAL = "short_range_final"
+SOURCE_PREDICTED = "predicted"
+
+# Precedence when several sources price the same slot: lower rank wins, equal ranks
+# keep whichever came first. Real rates beat everything; a source's own final
+# prices beat its estimates, which beat the long-range forecast. A source this
+# table doesn't know ranks as the forecast, i.e. exactly as every non-actual
+# source did before short-range forecasts existed.
+_SOURCE_RANK = {
+    SOURCE_CURRENT_ACTUAL: 0,
+    SOURCE_NEXT_ACTUAL: 0,
+    SOURCE_SHORT_RANGE_FINAL: 1,
+    SOURCE_SHORT_RANGE: 2,
+    SOURCE_PREDICTED: 3,
+}
+_UNKNOWN_SOURCE_RANK = _SOURCE_RANK[SOURCE_PREDICTED]
+_ACTUAL_GRADE_SOURCES = frozenset({SOURCE_CURRENT_ACTUAL, SOURCE_NEXT_ACTUAL, SOURCE_SHORT_RANGE_FINAL})
+
 TIER_ACTUAL = "actual"
+TIER_SHORT_RANGE = "short_range"
 TIER_PREDICTED_0_24 = "predicted_0_24"
 TIER_PREDICTED_24_48 = "predicted_24_48"
 TIER_PREDICTED_48_72 = "predicted_48_72"
@@ -29,6 +84,11 @@ TIER_PREDICTED_72_PLUS = "predicted_72_plus"
 
 BASE_CREDIBILITY = {
     TIER_ACTUAL: 1.0,
+    # Fallback only: coordinator.py always stamps short-range slots with the
+    # user-configured confidence (a "base_credibility" field, see
+    # slot_base_credibility). Mirrors const.DEFAULT_SHORT_RANGE_CONFIDENCE, which
+    # this module can't import (see the module note on OPTIMIZATION_ALGORITHM_*).
+    TIER_SHORT_RANGE: 0.95,
     TIER_PREDICTED_0_24: 0.90,
     TIER_PREDICTED_24_48: 0.75,
     TIER_PREDICTED_48_72: 0.60,
@@ -38,9 +98,13 @@ BASE_CREDIBILITY = {
 
 def get_source_tier(source: str, slot_dt: datetime, now_dt: datetime) -> str:
     """Return credibility tier string for a price slot based on source and time horizon."""
-    if source in ("current_actual", "next_actual"):
+    if source in _ACTUAL_GRADE_SOURCES:
         return TIER_ACTUAL
-    hours_ahead = (slot_dt - now_dt).total_seconds() / 3600
+    if source == SOURCE_SHORT_RANGE:
+        # Deliberately horizon-independent: a short-range source exists because it is
+        # trusted over the long-range forecast at the distances it covers.
+        return TIER_SHORT_RANGE
+    hours_ahead = (to_utc(slot_dt) - to_utc(now_dt)).total_seconds() / 3600
     if hours_ahead <= 24:
         return TIER_PREDICTED_0_24
     if hours_ahead <= 48:
@@ -50,9 +114,33 @@ def get_source_tier(source: str, slot_dt: datetime, now_dt: datetime) -> str:
     return TIER_PREDICTED_72_PLUS
 
 
-def compute_effective_price(raw_price: float, tier: str, gamble_tolerance: float) -> float:
-    """Risk-adjusted price used for slot ranking. Low gamble_tolerance inflates predicted
-    prices, favouring known actual rates; at 100 all prices are taken at face value.
+# A credibility of 0 would make compute_effective_price divide by zero at a gamble
+# tolerance of 0; this floor keeps the ranking finite (just extremely unattractive).
+_MIN_CREDIBILITY = 0.01
+
+
+def _resolve_base_credibility(tier: str, override: float | None) -> float:
+    """The tier's base credibility, or a per-slot `override` clamped to a usable
+    range. A missing or non-finite override falls back to the tier's own value
+    rather than propagating NaN into every price comparison."""
+    if override is None or not math.isfinite(override):
+        return BASE_CREDIBILITY[tier]
+    return max(_MIN_CREDIBILITY, min(1.0, override))
+
+
+def slot_base_credibility(slot: dict) -> float:
+    """A slot's base credibility: its own "base_credibility" override if it has one
+    (short-range slots do), otherwise its tier's. Single definition shared by
+    price ranking and the session `confidence` figure so the two can't drift."""
+    return _resolve_base_credibility(slot.get("tier", TIER_ACTUAL), slot.get("base_credibility"))
+
+
+def compute_effective_price(
+    raw_price: float, tier: str, gamble_tolerance: float, base_credibility: float | None = None
+) -> float:
+    """Risk-adjusted price used for slot ranking. Low gamble_tolerance makes predicted
+    prices less attractive (inflating positive ones, shrinking negative ones toward zero),
+    favouring known actual rates; at 100 all prices are taken at face value.
 
     gamble_tolerance is clamped to [0, 100] -- its only intended domain. Above
     100, eff_cred exceeds 1.0 for predicted tiers, making a predicted price
@@ -60,10 +148,19 @@ def compute_effective_price(raw_price: float, tier: str, gamble_tolerance: float
     ranking (issue #41). Sufficiently below 0, eff_cred crosses zero and this
     function divides by it (issue #42). The live number entity already
     clamps to [0, 100], but a stored value can bypass that (see coordinator.py).
+
+    base_credibility, if given, replaces the tier's own base value (clamped to a
+    usable range) -- how a short-range source's configured confidence is applied.
     """
     gamble_tolerance = max(0.0, min(100.0, gamble_tolerance))
-    base_cred = BASE_CREDIBILITY[tier]
+    base_cred = _resolve_base_credibility(tier, base_credibility)
     eff_cred = base_cred + (1.0 - base_cred) * (gamble_tolerance / 100.0)
+    if raw_price < 0:
+        # Negative prices ("plunge pricing") flip the direction of the penalty: dividing -5p by
+        # 0.9 gives -5.6p, making a doubtful price look MORE attractive than a real -5p one.
+        # Shrinking it toward zero instead keeps "doubtful is never better than real" true for
+        # every sign, and meets the positive branch continuously at zero.
+        return raw_price * eff_cred
     return raw_price / eff_cred
 
 
@@ -72,8 +169,9 @@ def assign_credibilities(slots: list[dict], now_dt: datetime, gamble_tolerance: 
     result = []
     for slot in slots:
         tier = get_source_tier(slot["source"], slot["date_time"], now_dt)
-        eff_price = compute_effective_price(slot["raw_price"], tier, gamble_tolerance)
+        eff_price = compute_effective_price(slot["raw_price"], tier, gamble_tolerance, slot.get("base_credibility"))
         entry = dict(slot)
+        entry["date_time"] = to_utc(slot["date_time"])
         entry["tier"] = tier
         entry["effective_price"] = eff_price
         result.append(entry)
@@ -87,14 +185,29 @@ def build_contiguous_runs(slots: list[dict]) -> list[list[dict]]:
     runs = []
     current_run = [slots[0]]
     for slot in slots[1:]:
-        expected = current_run[-1]["date_time"] + timedelta(minutes=30)
-        if slot["date_time"] == expected:
+        expected = to_utc(current_run[-1]["date_time"]) + timedelta(minutes=30)
+        if to_utc(slot["date_time"]) == expected:
             current_run.append(slot)
         else:
             runs.append(current_run)
             current_run = [slot]
     runs.append(current_run)
     return runs
+
+
+def _eligible_slots(candidate_slots: list[dict], ready_by_dt: datetime) -> list[dict]:
+    """The candidates that finish by ready_by, sorted by time, with every `date_time` as a UTC
+    instant (see to_utc). Shared by all three algorithms so the deadline rule and the
+    DST-safe normalisation live in exactly one place. A slot that is already UTC is passed
+    through as the same object rather than copied."""
+    deadline = to_utc(ready_by_dt)
+    eligible = []
+    for slot in candidate_slots:
+        start = to_utc(slot["date_time"])
+        if start + timedelta(minutes=30) <= deadline:
+            eligible.append(slot if start is slot["date_time"] else {**slot, "date_time": start})
+    eligible.sort(key=lambda s: s["date_time"])
+    return eligible
 
 
 def _best_topup(
@@ -135,7 +248,7 @@ def _best_topup(
             return False
         if max_price is None:
             return True
-        return all(sum(x["raw_price"] for x in blk) / len(blk) <= max_price for blk in blocks)
+        return all(_within_cap(sum(x["raw_price"] for x in blk), len(blk), max_price) for blk in blocks)
 
     step = timedelta(minutes=30)
     free_by_dt = {s["date_time"]: s for s in free}
@@ -200,7 +313,9 @@ def _find_optimal_slots_greedy(
     only ever compares individual window averages against each other, never total cost
     of one combination against another (issue #55). Kept as the default, unchanged,
     alongside the exact `_find_optimal_slots_optimal` and narrowed-search
-    `_find_optimal_slots_hybrid` alternatives -- see `find_optimal_slots`.
+    `_find_optimal_slots_hybrid` alternatives -- see `find_optimal_slots`. If greedy's own
+    selection cannot be completed it defers to the exact search rather than report a
+    schedulable market as unschedulable.
 
     max_block_hours (if given and > 0) caps how long any single contiguous block may
     be — a cheap run longer than this is never offered as one big window, so when the
@@ -231,8 +346,7 @@ def _find_optimal_slots_greedy(
         # requirement above.
         max_slots_per_block = max(max_slots_per_block, min_slots_per_block)
 
-    eligible = [s for s in candidate_slots if s["date_time"] + timedelta(minutes=30) <= ready_by_dt]
-    eligible.sort(key=lambda s: s["date_time"])
+    eligible = _eligible_slots(candidate_slots, ready_by_dt)
 
     all_runs = build_contiguous_runs(eligible)
     valid_runs = [r for r in all_runs if len(r) >= min_slots_per_block]
@@ -263,10 +377,10 @@ def _find_optimal_slots_greedy(
 
         for size in range(min_slots_per_block, max_window_size + 1):
             for start_idx in range(len(run) - size + 1):
-                if max_price is not None:
-                    raw_avg = (raw_prefix[start_idx + size] - raw_prefix[start_idx]) / size
-                    if raw_avg > max_price:
-                        continue
+                if max_price is not None and not _within_cap(
+                    raw_prefix[start_idx + size] - raw_prefix[start_idx], size, max_price
+                ):
+                    continue
                 eff_sum = eff_prefix[start_idx + size] - eff_prefix[start_idx]
                 windows.append(
                     {
@@ -351,7 +465,14 @@ def _find_optimal_slots_greedy(
         selected_dts = _complete(selected_windows, remaining)
 
     if selected_dts is None:
-        return []
+        # Greedy's cheapest-window-first order can paint itself into a corner under a tight
+        # max_price (on ~0.03% of random markets nothing it picked could be completed although a
+        # valid schedule existed). "Unschedulable" means the car does not charge, so before
+        # reporting it ask the exact search -- it only runs when greedy has already failed, so
+        # the fast path costs nothing, and a genuinely unschedulable market still returns [].
+        return _find_optimal_slots_optimal(
+            candidate_slots, required_slots, ready_by_dt, min_block_hours, max_price, max_block_hours
+        )
 
     result = [s for s in eligible if s["date_time"] in selected_dts]
     result.sort(key=lambda s: s["date_time"])
@@ -364,37 +485,44 @@ def _min_cost_for_run(
     min_slots_per_block: int,
     max_slots_per_block: int | None,
     max_price: float | None,
-) -> tuple[list[float], list, list[int]]:
-    """DP over a single contiguous run: for every k in 0..k_cap, the minimum total
-    effective-price cost of selecting exactly k of the run's slots as a union of
-    disjoint contiguous blocks, each sized min_slots_per_block..max_slots_per_block
-    (unbounded above if max_slots_per_block is None) and (if max_price given) with raw
-    average <= max_price.
+    allow_short_block: bool = True,
+) -> tuple[list[list[float]], list, list[list]]:
+    """Exact DP over a single contiguous run: for every k in 0..k_cap, the minimum total
+    effective-price cost of selecting exactly k of the run's slots as a union of disjoint
+    contiguous blocks, each sized min_slots_per_block..max_slots_per_block (unbounded above
+    if max_slots_per_block is None) and (if max_price given) with raw average <= max_price
+    -- except that ONE block anywhere may be shorter than the minimum (the documented "last
+    block may end up shorter" relaxation), which is why costs has two rows.
 
-    Returns (cost_by_k, history, end_state_by_k): cost_by_k[k] is math.inf if k is
-    unreachable; history[t] holds the backpointer choice made at run-index t for every
-    (k, state) cell reached there; end_state_by_k[k] is the state cost_by_k[k] was read
-    from. _reconstruct_run_selection replays these to recover which slots were picked.
+    Returns (costs, history, ends). costs[u][k] is the minimum cost using exactly u short
+    blocks (u=0: none; u=1: one) and is math.inf if unreachable; the u=1 row exists only when
+    a short block is possible at all (min_slots_per_block > 1 and allow_short_block). history[t][u][k][state] is the
+    backpointer made at run-index t, and ends[u][k] the (u, state) cell costs[u][k] was read
+    from; _reconstruct_run_selection replays these to recover which slots were picked.
+
+    The short-block allowance has to live inside the DP, as a flag in the state, rather than
+    being added afterwards: the cheapest set of full blocks and the cheapest short block
+    interact (the best answer can use a dearer full block precisely so a lone cheap slot
+    elsewhere can be the short one), so choosing them independently is not exact.
 
     The state machine tracks, per position, how many slots have been consumed in the
     currently-open block (0 = not in a block). Once a block has consumed
-    min_slots_per_block slots it becomes "free" and may end at any point or keep
-    extending; states 1..min_slots_per_block-1 are "still mandatory" and must extend.
-    This keeps the per-position state count at max_slots_per_block+1 (or
-    min_slots_per_block+1 when unbounded, since every "free" length collapses to one
-    absorbing state) instead of re-deriving eligible block sizes from scratch at every
-    (position, k) cell, which would cost an extra O(block-size-range) factor -- this is
-    what makes an exact search over ALL combinations tractable (O(run_length * k_cap)
-    per run), unlike a naive DP that scans every block size at every cell.
+    min_slots_per_block slots it becomes "free" and may end at any point or keep extending;
+    states below that are "still mandatory" and must extend -- unless the short-block
+    allowance is unspent, in which case they may also end right there. This keeps the
+    per-position state count at max_slots_per_block+1 (or min_slots_per_block+1 when
+    unbounded, since every "free" length collapses to one absorbing state) instead of
+    re-deriving eligible block sizes from scratch at every (position, k) cell, which would
+    cost an extra O(block-size-range) factor.
 
     max_price is checked only where a block's size is actually decided -- the "end"
-    transition (it stops growing) and the final cost_by_k scan (it's still open when the
-    run runs out) -- never while a block is still growing. An earlier version rejected
-    growth as soon as any intermediate prefix's average exceeded max_price, which
-    permanently closed off longer versions of the same block whose eventual average
-    would have been fine once diluted by more/cheaper slots later on -- e.g. a block
-    starting [30, 1] (avg 15.5, over a cap of 12) was rejected outright, even though
-    growing it to [30, 1, 1, 1, 1] (avg 6.8) is a valid, cheap block under the same cap.
+    transitions (it stops growing) and the final scan (it's still open when the run runs
+    out) -- never while a block is still growing. An earlier version rejected growth as soon
+    as any intermediate prefix's average exceeded max_price, which permanently closed off
+    longer versions of the same block whose eventual average would have been fine once
+    diluted by more/cheaper slots later on -- e.g. a block starting [30, 1] (avg 15.5, over
+    a cap of 12) was rejected outright, even though growing it to [30, 1, 1, 1, 1] (avg 6.8)
+    is a valid, cheap block under the same cap.
     """
     n = len(run)
     k_cap = min(n, k_cap)
@@ -411,235 +539,189 @@ def _min_cost_for_run(
         hi = max(lo, k_cap)
     else:
         hi = max_slots_per_block
+    allow_short = lo > 1 and allow_short_block
+    num_u = 2 if allow_short else 1
 
     raw_prefix = [0.0]
     for s in run:
         raw_prefix.append(raw_prefix[-1] + s["raw_price"])
 
+    def block_ok(end: int, size: int) -> bool:
+        """Whether the block occupying run[end-size:end] satisfies max_price."""
+        return max_price is None or _within_cap(raw_prefix[end] - raw_prefix[end - size], size, max_price)
+
     OUT = 0
     num_states = hi + 1  # OUT, plus "consumed c slots" for c in 1..hi
+    INF = math.inf
 
-    NEG = math.inf
-    dp = [[NEG] * num_states for _ in range(k_cap + 1)]
-    dp[0][OUT] = 0.0
-    history: list[list[list[tuple | None]]] = []
+    def empty_layer():
+        return [[[INF] * num_states for _ in range(k_cap + 1)] for _ in range(num_u)]
+
+    dp = empty_layer()
+    dp[0][0][OUT] = 0.0
+    history: list = []
 
     for t in range(n):
-        ndp = [[NEG] * num_states for _ in range(k_cap + 1)]
-        nchoice: list[list[tuple | None]] = [[None] * num_states for _ in range(k_cap + 1)]
+        ndp = empty_layer()
+        nchoice: list = [[[None] * num_states for _ in range(k_cap + 1)] for _ in range(num_u)]
         price = run[t]["effective_price"]
-        for k in range(k_cap + 1):
-            row = dp[k]
-            for s in range(num_states):
-                val = row[s]
-                if val == NEG:
-                    continue
-                if s == OUT:
-                    if val < ndp[k][OUT]:
-                        ndp[k][OUT] = val
-                        nchoice[k][OUT] = ("skip", k, s)
-                    if k + 1 <= k_cap:
-                        # Growing a block is never rejected mid-flight -- max_price
-                        # constrains a block's FINAL average once it stops growing, not
-                        # every intermediate prefix along the way (a block that looks
-                        # expensive at its minimum size can still average under the cap
-                        # once diluted by more, cheaper slots later in the same block).
-                        # The check happens once, at the "end" transition below and in
-                        # the final cost_by_k scan, for whatever size the block actually
-                        # settles at -- not here.
-                        nxt = 1 if hi >= 1 else OUT
+        for u in range(num_u):
+            for k in range(k_cap + 1):
+                row = dp[u][k]
+                for s in range(num_states):
+                    val = row[s]
+                    if val == INF:
+                        continue
+                    if s == OUT:
+                        if val < ndp[u][k][OUT]:
+                            ndp[u][k][OUT] = val
+                            nchoice[u][k][OUT] = ("skip", u, k, s)
+                        if k + 1 <= k_cap and hi >= 1:
+                            # Growing a block is never rejected mid-flight -- max_price
+                            # constrains a block's FINAL average once it stops growing, not
+                            # every intermediate prefix along the way. The check happens
+                            # once, at an "end" transition or the final scan.
+                            cand = val + price
+                            if cand < ndp[u][k + 1][1]:
+                                ndp[u][k + 1][1] = cand
+                                nchoice[u][k + 1][1] = ("start", u, k, s)
+                        continue
+                    c = s
+                    free = c == lo if unbounded else c >= lo
+                    if not free:
+                        # Short of the minimum block size: extend...
+                        if k + 1 <= k_cap:
+                            cand = val + price
+                            if cand < ndp[u][k + 1][c + 1]:
+                                ndp[u][k + 1][c + 1] = cand
+                                nchoice[u][k + 1][c + 1] = ("mand", u, k, s)
+                        # ...or, once per schedule, stop here as the one short block.
+                        if allow_short and u == 0 and block_ok(t, c) and val < ndp[1][k][OUT]:
+                            ndp[1][k][OUT] = val
+                            nchoice[1][k][OUT] = ("endshort", u, k, s)
+                        continue
+                    # Free: may end the block here (this position starts fresh as OUT) --
+                    # the one point a full block's size is decided, so its average is
+                    # checked against max_price here.
+                    if block_ok(t, c) and val < ndp[u][k][OUT]:
+                        ndp[u][k][OUT] = val
+                        nchoice[u][k][OUT] = ("end", u, k, s)
+                    # ...or extend it, if a longer block is still allowed.
+                    if (unbounded or c < hi) and k + 1 <= k_cap:
+                        nxt_c = c if unbounded else c + 1
                         cand = val + price
-                        if cand < ndp[k + 1][nxt]:
-                            ndp[k + 1][nxt] = cand
-                            nchoice[k + 1][nxt] = ("start", k, s)
-                    continue
-                c = s
-                is_free = c == lo if unbounded else c >= lo
-                if not is_free:
-                    # Still short of the minimum block size -- must extend, no choice to
-                    # end yet (see the OUT branch above for why max_price isn't checked
-                    # here either).
-                    if k + 1 <= k_cap:
-                        cand = val + price
-                        if cand < ndp[k + 1][c + 1]:
-                            ndp[k + 1][c + 1] = cand
-                            nchoice[k + 1][c + 1] = ("mand", k, s)
-                    continue
-                # Free: may end the block here (this position starts fresh as OUT) --
-                # this is the one point a block's size is actually decided, so it's the
-                # one point its average is checked against max_price.
-                block_ok = True
-                if max_price is not None:
-                    block_start = t - c
-                    raw_avg = (raw_prefix[t] - raw_prefix[block_start]) / c
-                    block_ok = raw_avg <= max_price
-                if block_ok and val < ndp[k][OUT]:
-                    ndp[k][OUT] = val
-                    nchoice[k][OUT] = ("end", k, s)
-                # ...or extend it, if a longer block is still allowed (again, not
-                # rejected here even if the average-so-far is over max_price -- only
-                # ending the block validates it).
-                can_extend = unbounded or c < hi
-                if can_extend and k + 1 <= k_cap:
-                    nxt_c = c if unbounded else c + 1
-                    cand = val + price
-                    if cand < ndp[k + 1][nxt_c]:
-                        ndp[k + 1][nxt_c] = cand
-                        nchoice[k + 1][nxt_c] = ("extend", k, s)
+                        if cand < ndp[u][k + 1][nxt_c]:
+                            ndp[u][k + 1][nxt_c] = cand
+                            nchoice[u][k + 1][nxt_c] = ("extend", u, k, s)
         dp = ndp
         history.append(nchoice)
 
-    cost_by_k = [NEG] * (k_cap + 1)
-    end_state_by_k: list[int] = [OUT] * (k_cap + 1)
-    for k in range(k_cap + 1):
-        best = dp[k][OUT]
-        best_state = OUT
-        for c in range(1, num_states):
-            is_free = c == lo if unbounded else c >= lo
-            if not is_free or dp[k][c] >= best:
-                continue
-            # A block still open (free, never explicitly ended) when the run runs out
-            # of slots is implicitly "ended" here, at the run boundary -- the same
-            # max_price check the "end" transition applies during the main loop, since
-            # this is the other (only) place a block's size is finally decided.
-            if max_price is not None:
-                block_start = n - c
-                raw_avg = (raw_prefix[n] - raw_prefix[block_start]) / c
-                if raw_avg > max_price:
+    costs = [[INF] * (k_cap + 1) for _ in range(num_u)]
+    ends: list = [[None] * (k_cap + 1) for _ in range(num_u)]
+    for u_cell in range(num_u):
+        for k in range(k_cap + 1):
+            for c in range(num_states):
+                val = dp[u_cell][k][c]
+                if val == INF:
                     continue
-            best = dp[k][c]
-            best_state = c
-        cost_by_k[k] = best
-        end_state_by_k[k] = best_state
+                if c == OUT:
+                    u_out = u_cell
+                elif (c == lo) if unbounded else (c >= lo):
+                    # A block still open when the run runs out of slots is implicitly "ended"
+                    # here -- the same max_price check the "end" transition applies.
+                    if not block_ok(n, c):
+                        continue
+                    u_out = u_cell
+                else:
+                    # Open and still short of the minimum: it can only be the one short block.
+                    if not (allow_short and u_cell == 0 and block_ok(n, c)):
+                        continue
+                    u_out = 1
+                if val < costs[u_out][k]:
+                    costs[u_out][k] = val
+                    ends[u_out][k] = (u_cell, c)
 
-    return cost_by_k, history, end_state_by_k
+    return costs, history, ends
 
 
-def _reconstruct_run_selection(run: list[dict], history: list, k: int, end_state_by_k: list[int]) -> set:
+def _reconstruct_run_selection(run: list[dict], history: list, u: int, k: int, ends: list) -> set:
     """Recover which of a run's date_times were selected to achieve _min_cost_for_run's
-    cost_by_k[k], by replaying the DP's backpointers from the best final state at k."""
+    costs[u][k], by replaying the DP's backpointers from the cell that cost was read from."""
     selected: set = set()
-    cur_k, cur_s = k, end_state_by_k[k]
+    cur_u, cur_s = ends[u][k]
+    cur_k = k
     for t in range(len(run) - 1, -1, -1):
-        kind, prev_k, prev_s = history[t][cur_k][cur_s]
+        kind, prev_u, prev_k, prev_s = history[t][cur_u][cur_k][cur_s]
         if kind in ("start", "mand", "extend"):
             selected.add(run[t]["date_time"])
-        cur_k, cur_s = prev_k, prev_s
+        cur_u, cur_k, cur_s = prev_u, prev_k, prev_s
     return selected
 
 
 def _solve_with_per_run_costs(
     eligible: list[dict],
     valid_runs: list[list[dict]],
-    eligible_from_valid: list[dict],
-    per_run: list[tuple[list[float], list, list[int]]],
+    per_run: list[tuple[list[list[float]], list, list]],
     required_slots: int,
-    max_price: float | None,
-    min_slots_per_block: int,
-    max_slots_per_block: int | None = None,
 ) -> list[dict]:
     """Shared final stage for both DP-based algorithms (_find_optimal_slots_optimal,
-    _find_optimal_slots_hybrid): given each valid run's _min_cost_for_run cost curve,
-    find the overall cheapest required_slots-sized selection.
+    _find_optimal_slots_hybrid): given each valid run's _min_cost_for_run cost curves, find
+    the overall cheapest required_slots-sized selection.
 
-    If max_price is set and no run has a valid block of any size, there is nothing to
-    build a schedule from at all -- same as OPTIMIZATION_ALGORITHM_GREEDY's own early
-    "no priced windows survived the cap" guard, which this mirrors. Without it, the
-    relaxed leftover top-up below (which -- also matching greedy -- doesn't itself
-    filter candidate slots by max_price, since a single top-up slot isn't a priced
-    block average) would otherwise be the only candidate and could return a schedule
-    entirely made of slots over the cap.
+    A knapsack over the runs, with the number of short blocks used so far as part of the
+    state (combined[u][j] = the cheapest way to hold exactly j slots across the runs
+    considered so far using u short blocks, u in {0, 1}): at most one short block may exist
+    in the whole schedule, wherever it falls. A schedule with no short block wins ties.
 
-    A small knapsack (combined[j] = min cost to select exactly j slots using whole
-    valid blocks from the runs considered so far) finds, for every partial total j up
-    to required_slots, the cheapest way to reach it using only fully min_block_hours-
-    respecting blocks. j == required_slots itself is one candidate answer; every
-    smaller j is also tried, topped up to required_slots with the cheapest leftover
-    individual slots (the same "last block may end up shorter than min_block_hours"
-    relaxation every algorithm falls back to) -- and the overall cheapest candidate
-    wins, whether or not the strict j == required_slots combination succeeded.
-
-    Trying every partial total (not just falling back to it when the strict one fails)
-    matters because a combination that bends the block-size rule for one cheap leftover
-    slot can beat a stricter one that doesn't -- matching OPTIMIZATION_ALGORITHM_GREEDY's
-    own willingness to use that fallback opportunistically rather than only as an
-    unschedulable-otherwise last resort (confirmed during issue #55 verification: an
-    "optimal" that always preferred the strict combination could come out pricier than
-    greedy on exactly this kind of case, which an "optimal" algorithm must never do).
+    Because the short-block allowance is inside the per-run DP, this is exact -- no separate
+    "top up the remainder" step, and nothing a heuristic could miss. (An earlier version
+    chose the cheapest full blocks first and then topped up, and lost to the true optimum on
+    about 1% of small random markets in a brute-force comparison.)
     """
-    if max_price is not None and all(all(c == math.inf for c in cost_by_k[1:]) for cost_by_k, _, _ in per_run):
-        return []
-
-    combined = [math.inf] * (required_slots + 1)
-    combined[0] = 0.0
-    choices: list[list[int | None]] = []
-    for cost_by_k, _, _ in per_run:
-        new_combined = list(combined)
-        choice_row: list[int | None] = [None] * (required_slots + 1)
-        max_k = len(cost_by_k) - 1
-        for j in range(required_slots + 1):
-            if combined[j] == math.inf:
-                continue
-            upper = min(max_k, required_slots - j)
-            for k in range(1, upper + 1):
-                cost_k = cost_by_k[k]
-                if cost_k == math.inf:
+    INF = math.inf
+    combined = [[INF] * (required_slots + 1) for _ in range(2)]
+    combined[0][0] = 0.0
+    choices: list = []
+    for costs, _, _ in per_run:
+        new_combined = [row[:] for row in combined]
+        choice: list = [[None] * (required_slots + 1) for _ in range(2)]
+        max_k = len(costs[0]) - 1
+        for u_prev in range(2):
+            for j in range(required_slots + 1):
+                base = combined[u_prev][j]
+                if base == INF:
                     continue
-                cand = combined[j] + cost_k
-                if cand < new_combined[j + k]:
-                    new_combined[j + k] = cand
-                    choice_row[j + k] = k
+                for u_run, run_costs in enumerate(costs):
+                    u_new = u_prev + u_run
+                    if u_new > 1:
+                        continue
+                    for k in range(1, min(max_k, required_slots - j) + 1):
+                        cost_k = run_costs[k]
+                        if cost_k == INF:
+                            continue
+                        cand = base + cost_k
+                        if cand < new_combined[u_new][j + k]:
+                            new_combined[u_new][j + k] = cand
+                            choice[u_new][j + k] = (k, u_run, u_prev)
         combined = new_combined
-        choices.append(choice_row)
+        choices.append(choice)
 
-    def _backtrack(target_j: int) -> set:
-        selected_dts: set = set()
-        j = target_j
-        for run_idx in range(len(per_run) - 1, -1, -1):
-            k = choices[run_idx][j]
-            if not k:
-                continue
-            _, history, end_state_by_k = per_run[run_idx]
-            selected_dts |= _reconstruct_run_selection(valid_runs[run_idx], history, k, end_state_by_k)
-            j -= k
-        return selected_dts
-
-    # May be empty: a top-up must be one contiguous, under-cap window (see
-    # _best_topup), which can legitimately not exist.
-    # Branch and bound over the partial totals j: any top-up of `remaining` slots costs
-    # at least the `remaining` cheapest free prices overall, so visit j in order of that
-    # lower bound and stop once it can't beat the best complete answer found.
-    cheapest_prefix = [0.0]
-    for price in sorted(s["effective_price"] for s in eligible_from_valid):
-        cheapest_prefix.append(cheapest_prefix[-1] + price)
-    order = sorted(
-        (j for j in range(required_slots + 1) if combined[j] != math.inf),
-        key=lambda j: combined[j] + cheapest_prefix[required_slots - j],
-    )
-    candidates: list[tuple[set, float]] = []
-    best_cost = math.inf
-    for j in order:
-        remaining = required_slots - j
-        if combined[j] + cheapest_prefix[remaining] >= best_cost:
-            break
-        whole_block_dts = _backtrack(j) if j > 0 else set()
-        if remaining == 0:
-            candidates.append((whole_block_dts, combined[j]))
-            best_cost = min(best_cost, combined[j])
-            continue
-        window = _best_topup(
-            eligible_from_valid, whole_block_dts, remaining, min_slots_per_block, max_price, max_slots_per_block
-        )
-        if window is None:
-            continue
-        cost = combined[j] + sum(s["effective_price"] for s in window)
-        candidates.append((whole_block_dts | {s["date_time"] for s in window}, cost))
-        best_cost = min(best_cost, cost)
-
-    if not candidates:
+    best_u = 0 if combined[0][required_slots] <= combined[1][required_slots] else 1
+    if combined[best_u][required_slots] == INF:
         return []
 
-    selected_dts, _ = min(candidates, key=lambda c: c[1])
+    selected_dts: set = set()
+    u, j = best_u, required_slots
+    for run_idx in range(len(per_run) - 1, -1, -1):
+        chosen = choices[run_idx][u][j]
+        if chosen is None:  # this run contributed nothing to the optimum
+            continue
+        k, u_run, u_prev = chosen
+        _, history, ends = per_run[run_idx]
+        selected_dts |= _reconstruct_run_selection(valid_runs[run_idx], history, u_run, k, ends)
+        j -= k
+        u = u_prev
+
     result = [s for s in eligible if s["date_time"] in selected_dts]
     result.sort(key=lambda s: s["date_time"])
     return result
@@ -667,6 +749,7 @@ def _find_optimal_slots_optimal(
     min_block_hours: float,
     max_price: float | None = None,
     max_block_hours: float | None = None,
+    allow_short_block: bool = True,
 ) -> list[dict]:
     """Exact version of find_optimal_slots (OPTIMIZATION_ALGORITHM_OPTIMAL): every
     contiguous run of eligible slots is solved exactly via _min_cost_for_run's DP
@@ -690,8 +773,7 @@ def _find_optimal_slots_optimal(
         required_slots, min_block_hours, max_block_hours
     )
 
-    eligible = [s for s in candidate_slots if s["date_time"] + timedelta(minutes=30) <= ready_by_dt]
-    eligible.sort(key=lambda s: s["date_time"])
+    eligible = _eligible_slots(candidate_slots, ready_by_dt)
 
     all_runs = build_contiguous_runs(eligible)
     valid_runs = [r for r in all_runs if len(r) >= min_slots_per_block]
@@ -701,20 +783,11 @@ def _find_optimal_slots_optimal(
         return []
 
     per_run = [
-        _min_cost_for_run(run, required_slots, min_slots_per_block, max_slots_per_block, max_price)
+        _min_cost_for_run(run, required_slots, min_slots_per_block, max_slots_per_block, max_price, allow_short_block)
         for run in valid_runs
     ]
 
-    return _solve_with_per_run_costs(
-        eligible,
-        valid_runs,
-        eligible_from_valid,
-        per_run,
-        required_slots,
-        max_price,
-        min_slots_per_block,
-        max_slots_per_block,
-    )
+    return _solve_with_per_run_costs(eligible, valid_runs, per_run, required_slots)
 
 
 def _find_optimal_slots_hybrid(
@@ -724,6 +797,7 @@ def _find_optimal_slots_hybrid(
     min_block_hours: float,
     max_price: float | None = None,
     max_block_hours: float | None = None,
+    allow_short_block: bool = True,
 ) -> list[dict]:
     """Narrowed-search version of find_optimal_slots (OPTIMIZATION_ALGORITHM_HYBRID):
     a fast pre-pass restricts each run's DP to a handful of representative block sizes
@@ -746,8 +820,7 @@ def _find_optimal_slots_hybrid(
         required_slots, min_block_hours, max_block_hours
     )
 
-    eligible = [s for s in candidate_slots if s["date_time"] + timedelta(minutes=30) <= ready_by_dt]
-    eligible.sort(key=lambda s: s["date_time"])
+    eligible = _eligible_slots(candidate_slots, ready_by_dt)
 
     all_runs = build_contiguous_runs(eligible)
     valid_runs = [r for r in all_runs if len(r) >= min_slots_per_block]
@@ -758,9 +831,11 @@ def _find_optimal_slots_hybrid(
 
     per_run = []
     for run in valid_runs:
+        # How much a run can contribute is bounded by its length and the requirement -- NOT by
+        # max_slots_per_block, which bounds each *block* (enforced inside the DP). A run can
+        # hold several blocks, so capping its total at one block's size would report "nothing
+        # schedulable" for a market that has a perfectly good multi-block answer.
         run_max = min(len(run), required_slots)
-        if max_slots_per_block is not None:
-            run_max = min(run_max, max_slots_per_block)
         # Representative sizes: the two ends of the run's usable range, the size that
         # would exactly cover the remaining requirement in one block, and a few
         # intermediate fractions of it -- narrowing the search from "every achievable
@@ -778,18 +853,11 @@ def _find_optimal_slots_hybrid(
         # largest representative size, keeping the DP's cost bounded independent of
         # required_slots when the run is much longer than any representative size.
         k_cap = max(candidate_sizes) if candidate_sizes else min_slots_per_block
-        per_run.append(_min_cost_for_run(run, k_cap, min_slots_per_block, max_slots_per_block, max_price))
+        per_run.append(
+            _min_cost_for_run(run, k_cap, min_slots_per_block, max_slots_per_block, max_price, allow_short_block)
+        )
 
-    return _solve_with_per_run_costs(
-        eligible,
-        valid_runs,
-        eligible_from_valid,
-        per_run,
-        required_slots,
-        max_price,
-        min_slots_per_block,
-        max_slots_per_block,
-    )
+    return _solve_with_per_run_costs(eligible, valid_runs, per_run, required_slots)
 
 
 def find_optimal_slots(
@@ -800,6 +868,7 @@ def find_optimal_slots(
     max_price: float | None = None,
     max_block_hours: float | None = None,
     algorithm: str = OPTIMIZATION_ALGORITHM_GREEDY,
+    avoid_short_block: bool = False,
 ) -> list[dict]:
     """Select the cheapest combination of slots totalling required_slots, where every
     contiguous block is >= min_block_hours and (if max_price given) each block's average
@@ -823,7 +892,22 @@ def find_optimal_slots(
     single cheapest option in the market genuinely is one long uninterrupted dip,
     capping the window size still results in back-to-back blocks with no gap between
     them, since there's no cost-based reason to leave a cheaper slot unpicked.
+
+    avoid_short_block: the one block allowed to be shorter than min_block_hours has
+    already been used by this request (it ran, or is running), so don't create another
+    if any alternative exists.
     """
+    if avoid_short_block:
+        # A short block (shorter than min_block_hours) has already been spent on this request, so
+        # prefer a schedule that needs none -- only fall back to allowing one if there is no other
+        # way, so this can never turn a schedulable market into an unschedulable one. Solved
+        # exactly whichever algorithm was asked for: the preference only bites in the rare case a
+        # short block was used, and an exact answer is what makes "no extra short block" reliable.
+        strict = _find_optimal_slots_optimal(
+            candidate_slots, required_slots, ready_by_dt, min_block_hours, max_price, max_block_hours, False
+        )
+        if strict:
+            return strict
     impl = _ALGORITHM_IMPLEMENTATIONS.get(algorithm, _find_optimal_slots_greedy)
     return impl(candidate_slots, required_slots, ready_by_dt, min_block_hours, max_price, max_block_hours)
 
@@ -840,17 +924,21 @@ def slots_to_sessions(selected_slots: list[dict]) -> list[dict]:
 
     confidence (0-100) is the average base credibility of the slots in the session:
     100 = all actual rates, down to 40 for predictions more than 72h out.
+
+    estimated is True if any slot in the session is not an actual-grade price, i.e.
+    the block could still move when the real rates are published -- what to check
+    before acting on a block ("charge now or wait for tomorrow's rates").
     """
     if not selected_slots:
         return []
-    sorted_slots = sorted(selected_slots, key=lambda s: s["date_time"])
+    sorted_slots = sorted(selected_slots, key=lambda s: to_utc(s["date_time"]))
     runs = build_contiguous_runs(sorted_slots)
     sessions = []
     for run in runs:
-        start = run[0]["date_time"]
-        end = run[-1]["date_time"] + timedelta(minutes=30)
+        start = to_utc(run[0]["date_time"])
+        end = to_utc(run[-1]["date_time"]) + timedelta(minutes=30)
         avg_price = sum(s["raw_price"] for s in run) / len(run)
-        avg_cred = sum(BASE_CREDIBILITY.get(s.get("tier", TIER_ACTUAL), 1.0) for s in run) / len(run)
+        avg_cred = sum(slot_base_credibility(s) for s in run) / len(run)
         sessions.append(
             {
                 "start": start.isoformat(),
@@ -858,6 +946,7 @@ def slots_to_sessions(selected_slots: list[dict]) -> list[dict]:
                 "duration_hours": len(run) * 0.5,
                 "avg_price": round(avg_price, 2),
                 "confidence": round(avg_cred * 100, 1),
+                "estimated": any(s.get("tier", TIER_ACTUAL) != TIER_ACTUAL for s in run),
             }
         )
     return sessions
@@ -878,6 +967,18 @@ def parse_dt(value) -> datetime:
     return parse_iso_str(str(value))
 
 
+def _session_span(session: dict) -> tuple[datetime, datetime]:
+    """A stored session's (start, end) as UTC instants, however they were persisted."""
+    return to_utc(parse_dt(session["start"])), to_utc(parse_dt(session["end"]))
+
+
+def session_slots(session: dict) -> int:
+    """Half-hours a stored session spans, derived from its start/end -- never from its stored
+    `duration_hours`, which is only a display field and can drift or arrive corrupt."""
+    start, end = _session_span(session)
+    return max(0, math.ceil(round((end - start).total_seconds() / 1800, 6)))
+
+
 def prune_and_classify(sessions: list[dict], now_dt: datetime) -> tuple[dict | None, list[dict]]:
     """Split sessions into (active_session | None, [future_sessions]). Expired
     sessions (end <= now_dt) are silently dropped.
@@ -892,17 +993,93 @@ def prune_and_classify(sessions: list[dict], now_dt: datetime) -> tuple[dict | N
     """
     active = None
     future = []
+    now_dt = to_utc(now_dt)
     for s in sessions:
-        start = parse_dt(s["start"])
-        end = parse_dt(s["end"])
+        start, end = _session_span(s)
         if start <= now_dt < end:
             if active is not None:
                 _LOGGER.warning("Discarding unexpected overlapping active session %r (keeping %r)", s, active)
                 continue
             active = s
         elif end > now_dt:
-            future.append(s)
-    return active, future
+            future.append((start, s))
+    # Chronological, whatever order the list was stored in: "the next session" is the first
+    # one in this list, and the combined schedule is built tier by tier, so a later required
+    # block would otherwise be reported as next ahead of an earlier opportunistic one.
+    future.sort(key=lambda pair: pair[0])
+    return active, [s for _, s in future]
+
+
+def clip_active_session(
+    session: dict, now_dt: datetime, allowed_slots: int, deadline_dt: datetime | None
+) -> tuple[dict | None, float]:
+    """Cut an in-progress session down to what its tier still allows: at most `allowed_slots`
+    half-hours in total and nothing past `deadline_dt`. Returns (session_to_keep, hours_to_credit).
+
+    A session is planned once and then carried forward untouched while it runs, so without this
+    a block outlives anything the user changes after it started -- lowering the requirement,
+    pausing a tier, pulling the deadline earlier -- and the charger just keeps going until the
+    block happens to end.
+
+    If the limit is still ahead the session is shortened (staying on the half-hour grid when the
+    allowance is what limits it). If it has been reached already the session stops *now*: it is
+    dropped and the whole slots that actually ran are returned for the caller to credit as
+    delivered, which an ended session would otherwise have contributed on its own. The input is
+    never mutated.
+    """
+    start, end = _session_span(session)
+    now = to_utc(now_dt)
+    limit = min(end, start + timedelta(minutes=30 * max(0, allowed_slots)))
+    if deadline_dt is not None:
+        limit = min(limit, to_utc(deadline_dt))
+    if limit >= end:
+        return session, 0.0
+    if limit <= now:
+        # Whole slots only: the delivered-hours accounting rounds a part-slot UP to a whole one,
+        # so crediting the exact elapsed time would count time that never ran. Under-crediting
+        # at worst re-plans one extra slot; over-crediting leaves the car short.
+        whole_slots = math.floor(round((now - start).total_seconds() / 1800, 6))
+        return None, max(0, whole_slots) / 2
+
+    clipped = dict(session)
+    tzinfo = parse_dt(session["end"]).tzinfo
+    clipped["end"] = (limit.astimezone(tzinfo) if tzinfo is not None else limit).isoformat()
+    clipped["duration_hours"] = (limit - start).total_seconds() / 3600
+    return clipped, 0.0
+
+
+def fit_future_sessions(sessions: list[dict], allowed_slots: int, deadline_dt: datetime | None) -> list[dict]:
+    """Trim one tier's not-yet-started sessions to at most `allowed_slots` half-hours in total,
+    none running past `deadline_dt`. The sibling of clip_active_session for sessions still to
+    come: used when the stored plan has to stand in for a fresh one (no price data to
+    recompute from) but the user has since lowered the requirement or moved the deadline.
+
+    Sessions are spent in time order; the one that straddles the limit is shortened (on whole
+    slots -- the scheduler only ever plans whole slots that finish by the deadline) and the rest
+    are dropped. Sessions that fit are returned as the same objects; the input is not mutated.
+    """
+    budget = max(0, allowed_slots)
+    deadline = to_utc(deadline_dt) if deadline_dt is not None else None
+    kept = []
+    for session in sorted(sessions, key=lambda s: _session_span(s)[0]):
+        start, end = _session_span(session)
+        slots = round((end - start).total_seconds() / 1800)
+        if deadline is not None:
+            slots = min(slots, math.floor((deadline - start).total_seconds() / 1800))
+        slots = min(slots, budget)
+        if slots <= 0:
+            continue
+        budget -= slots
+        if start + timedelta(minutes=30 * slots) >= end:
+            kept.append(session)
+            continue
+        clipped = dict(session)
+        new_end = start + timedelta(minutes=30 * slots)
+        tzinfo = parse_dt(session["end"]).tzinfo
+        clipped["end"] = (new_end.astimezone(tzinfo) if tzinfo is not None else new_end).isoformat()
+        clipped["duration_hours"] = slots / 2
+        kept.append(clipped)
+    return kept
 
 
 def compute_hours_remaining(future_sessions: list[dict], active_session: dict | None, now_dt: datetime) -> float:
@@ -917,30 +1094,35 @@ def compute_hours_remaining(future_sessions: list[dict], active_session: dict | 
     """
     total = 0.0
     if active_session:
-        end = parse_dt(active_session["end"])
-        total += max(0.0, (end - now_dt).total_seconds() / 3600)
+        _, end = _session_span(active_session)
+        total += max(0.0, (end - to_utc(now_dt)).total_seconds() / 3600)
     for s in future_sessions:
-        start = parse_dt(s["start"])
-        end = parse_dt(s["end"])
+        start, end = _session_span(s)
         total += (end - start).total_seconds() / 3600
     return total
 
 
+def _source_rank(source: str) -> int:
+    return _SOURCE_RANK.get(source, _UNKNOWN_SOURCE_RANK)
+
+
 def deduplicate_and_sort_prices(all_prices: list[dict], now_dt: datetime) -> list[dict]:
-    """Merge price data from all sources: actual rates win over predicted for the
-    same slot. Discards slots that have already ended, sorts the rest chronologically."""
+    """Merge price data from all sources: when several price the same slot the
+    best-ranked source wins (see _SOURCE_RANK -- actual rates, then a short-range
+    forecast's final prices, then its estimates, then the long-range forecast), and
+    equal ranks keep whichever came first. Discards slots that have already ended,
+    sorts the rest chronologically."""
     prices_by_dt: dict = {}
     for p in all_prices:
-        dt = p["date_time"]
-        is_actual = p["source"] in ("current_actual", "next_actual")
+        dt = to_utc(p["date_time"])
         existing = prices_by_dt.get(dt)
-        if existing is None or is_actual and existing["source"] not in ("current_actual", "next_actual"):
-            prices_by_dt[dt] = p
+        if existing is None or _source_rank(p["source"]) < _source_rank(existing["source"]):
+            prices_by_dt[dt] = p if dt is p["date_time"] else {**p, "date_time": dt}
 
     result = []
     for dt in sorted(prices_by_dt.keys()):
         p = prices_by_dt[dt]
-        if dt + timedelta(minutes=30) > now_dt:
+        if dt + timedelta(minutes=30) > to_utc(now_dt):
             result.append(p)
     return result
 
@@ -962,8 +1144,9 @@ def summarize_prices(slots: list[dict], now_dt: datetime, window_hours: float = 
         }
 
     prices = [s["raw_price"] for s in slots]
-    window_end = now_dt + timedelta(hours=window_hours)
-    window_prices = [s["raw_price"] for s in slots if now_dt <= s["date_time"] < window_end]
+    window_start = to_utc(now_dt)
+    window_end = window_start + timedelta(hours=window_hours)
+    window_prices = [s["raw_price"] for s in slots if window_start <= to_utc(s["date_time"]) < window_end]
 
     source_counts: dict[str, int] = {}
     for s in slots:
@@ -1021,14 +1204,29 @@ def next_ready_by(now_dt: datetime, hour: int = 7, min_day_offset: int = 0) -> d
     etc.), matching the "Next day / Next day+1/+2/+3" options configurable
     at setup time.
     """
-    candidate = now_dt.replace(hour=hour, minute=0, second=0, microsecond=0) + timedelta(days=min_day_offset)
-    if candidate.tzinfo is not None:
-        # `replace()` does naive wall-clock arithmetic -- on a DST transition day
-        # where `hour` falls in the skipped "spring forward" gap (e.g. 1am->2am
-        # somewhere becomes 2am->3am), the result may be a local time that never
-        # occurred. Round-tripping through UTC snaps it to the real local time
-        # at that instant instead of silently keeping an invalid offset (#27).
-        candidate = candidate.astimezone(UTC).astimezone(candidate.tzinfo)
-    if candidate <= now_dt:
-        candidate += timedelta(days=1)
+    candidate = _snap_to_real_time(
+        now_dt.replace(hour=hour, minute=0, second=0, microsecond=0) + timedelta(days=min_day_offset)
+    )
+    if to_utc(candidate) <= to_utc(now_dt):
+        candidate = _snap_to_real_time(candidate + timedelta(days=1))
     return candidate
+
+
+def _snap_to_real_time(dt: datetime) -> datetime:
+    """`dt` as a local time that really occurred, still in its own timezone.
+
+    Wall-clock arithmetic (`replace()`, adding days) can land on a local time that never
+    happened -- on a "spring forward" day where `hour` falls in the skipped gap (e.g.
+    1am->2am somewhere becomes 2am->3am). Round-tripping through UTC snaps it to the real
+    local time at that instant instead of silently keeping an invalid offset (#27).
+    """
+    if dt.tzinfo is None:
+        return dt
+    return dt.astimezone(UTC).astimezone(dt.tzinfo)
+
+
+def add_local_days(dt: datetime, days: int) -> datetime:
+    """`dt` moved `days` calendar days on the wall clock, so 07:00 stays 07:00 across a DST
+    change (rather than drifting by an hour, as adding 24h*days would), snapped to a real
+    local time if that wall time doesn't exist."""
+    return _snap_to_real_time(dt + timedelta(days=days))
