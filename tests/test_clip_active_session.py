@@ -159,3 +159,88 @@ def test_only_whole_slots_that_actually_ran_are_credited(elapsed_minutes, credit
     clipped, credit = clip_active_session(_session(3.0), _at(elapsed_minutes), allowed_slots=0, deadline_dt=None)
 
     assert clipped is None and credit == credited_hours
+
+
+# ---------------------------------------------------------------------------
+# fit_future_sessions: the same idea for sessions that have not started yet
+# ---------------------------------------------------------------------------
+
+from custom_components.wholesale_ev_schedule.scheduler import fit_future_sessions  # noqa: E402
+
+
+def _block(start_hour, hours=1.0, **extra):
+    return _session(hours, start=START + timedelta(hours=start_hour), **extra)
+
+
+def _spans(sessions):
+    return [(datetime.fromisoformat(s["start"]), datetime.fromisoformat(s["end"])) for s in sessions]
+
+
+def test_sessions_within_the_allowance_and_deadline_are_returned_unchanged():
+    sessions = [_block(2), _block(4, 2.0)]
+
+    kept = fit_future_sessions(sessions, allowed_slots=6, deadline_dt=DEADLINE)
+
+    assert kept == sessions and all(a is b for a, b in zip(kept, sessions, strict=True))
+
+
+def test_the_allowance_is_spent_in_chronological_order_and_the_overflow_is_dropped():
+    sessions = [_block(2), _block(4), _block(6)]
+
+    kept = fit_future_sessions(sessions, allowed_slots=4, deadline_dt=DEADLINE)
+
+    assert [s["start"] for s in kept] == [sessions[0]["start"], sessions[1]["start"]]
+
+
+def test_the_session_that_straddles_the_allowance_is_shortened_not_dropped():
+    sessions = [_block(2), _block(4, 2.0)]  # 2 + 4 slots
+
+    kept = fit_future_sessions(sessions, allowed_slots=3, deadline_dt=DEADLINE)
+
+    assert _spans(kept)[1][1] - _spans(kept)[1][0] == timedelta(hours=0.5)
+    assert kept[1]["duration_hours"] == 0.5
+
+
+def test_input_order_does_not_matter():
+    sessions = [_block(6), _block(2), _block(4)]
+    kept = fit_future_sessions(sessions, allowed_slots=2, deadline_dt=DEADLINE)
+    assert [s["start"] for s in kept] == [_block(2)["start"]]
+
+
+def test_nothing_is_kept_with_no_allowance():
+    assert fit_future_sessions([_block(2), _block(4)], allowed_slots=0, deadline_dt=DEADLINE) == []
+    assert fit_future_sessions([_block(2)], allowed_slots=-4, deadline_dt=DEADLINE) == []
+
+
+def test_sessions_after_the_deadline_are_dropped_and_one_crossing_it_ends_on_a_whole_slot():
+    deadline = START + timedelta(hours=4, minutes=40)
+    sessions = [_block(2), _block(4), _block(6)]
+
+    kept = fit_future_sessions(sessions, allowed_slots=20, deadline_dt=deadline)
+
+    assert len(kept) == 2
+    assert _spans(kept)[1][1] == START + timedelta(hours=4.5)
+
+
+def test_a_session_crossing_the_deadline_keeps_only_the_whole_slots_that_finish_in_time():
+    deadline = START + timedelta(hours=4, minutes=40)
+
+    (kept,) = fit_future_sessions([_block(4, 2.0)], allowed_slots=20, deadline_dt=deadline)
+
+    assert datetime.fromisoformat(kept["end"]) == START + timedelta(hours=4.5)
+
+
+def test_no_deadline_means_only_the_allowance_applies():
+    kept = fit_future_sessions([_block(2), _block(4)], allowed_slots=3, deadline_dt=None)
+    assert sum(s["duration_hours"] for s in kept) == 1.5
+
+
+def test_fitting_never_mutates_its_input():
+    sessions = [_block(2), _block(4, 2.0)]
+    snapshot = [dict(s) for s in sessions]
+    fit_future_sessions(sessions, allowed_slots=2, deadline_dt=START + timedelta(hours=5))
+    assert sessions == snapshot
+
+
+def test_an_empty_list_is_fine():
+    assert fit_future_sessions([], allowed_slots=5, deadline_dt=DEADLINE) == []

@@ -313,7 +313,9 @@ def _find_optimal_slots_greedy(
     only ever compares individual window averages against each other, never total cost
     of one combination against another (issue #55). Kept as the default, unchanged,
     alongside the exact `_find_optimal_slots_optimal` and narrowed-search
-    `_find_optimal_slots_hybrid` alternatives -- see `find_optimal_slots`.
+    `_find_optimal_slots_hybrid` alternatives -- see `find_optimal_slots`. If greedy's own
+    selection cannot be completed it defers to the exact search rather than report a
+    schedulable market as unschedulable.
 
     max_block_hours (if given and > 0) caps how long any single contiguous block may
     be — a cheap run longer than this is never offered as one big window, so when the
@@ -463,7 +465,14 @@ def _find_optimal_slots_greedy(
         selected_dts = _complete(selected_windows, remaining)
 
     if selected_dts is None:
-        return []
+        # Greedy's cheapest-window-first order can paint itself into a corner under a tight
+        # max_price (on ~0.03% of random markets nothing it picked could be completed although a
+        # valid schedule existed). "Unschedulable" means the car does not charge, so before
+        # reporting it ask the exact search -- it only runs when greedy has already failed, so
+        # the fast path costs nothing, and a genuinely unschedulable market still returns [].
+        return _find_optimal_slots_optimal(
+            candidate_slots, required_slots, ready_by_dt, min_block_hours, max_price, max_block_hours
+        )
 
     result = [s for s in eligible if s["date_time"] in selected_dts]
     result.sort(key=lambda s: s["date_time"])
@@ -965,8 +974,12 @@ def prune_and_classify(sessions: list[dict], now_dt: datetime) -> tuple[dict | N
                 continue
             active = s
         elif end > now_dt:
-            future.append(s)
-    return active, future
+            future.append((start, s))
+    # Chronological, whatever order the list was stored in: "the next session" is the first
+    # one in this list, and the combined schedule is built tier by tier, so a later required
+    # block would otherwise be reported as next ahead of an earlier opportunistic one.
+    future.sort(key=lambda pair: pair[0])
+    return active, [s for _, s in future]
 
 
 def clip_active_session(
@@ -1005,6 +1018,40 @@ def clip_active_session(
     clipped["end"] = (limit.astimezone(tzinfo) if tzinfo is not None else limit).isoformat()
     clipped["duration_hours"] = (limit - start).total_seconds() / 3600
     return clipped, 0.0
+
+
+def fit_future_sessions(sessions: list[dict], allowed_slots: int, deadline_dt: datetime | None) -> list[dict]:
+    """Trim one tier's not-yet-started sessions to at most `allowed_slots` half-hours in total,
+    none running past `deadline_dt`. The sibling of clip_active_session for sessions still to
+    come: used when the stored plan has to stand in for a fresh one (no price data to
+    recompute from) but the user has since lowered the requirement or moved the deadline.
+
+    Sessions are spent in time order; the one that straddles the limit is shortened (on whole
+    slots -- the scheduler only ever plans whole slots that finish by the deadline) and the rest
+    are dropped. Sessions that fit are returned as the same objects; the input is not mutated.
+    """
+    budget = max(0, allowed_slots)
+    deadline = to_utc(deadline_dt) if deadline_dt is not None else None
+    kept = []
+    for session in sorted(sessions, key=lambda s: _session_span(s)[0]):
+        start, end = _session_span(session)
+        slots = round((end - start).total_seconds() / 1800)
+        if deadline is not None:
+            slots = min(slots, math.floor((deadline - start).total_seconds() / 1800))
+        slots = min(slots, budget)
+        if slots <= 0:
+            continue
+        budget -= slots
+        if start + timedelta(minutes=30 * slots) >= end:
+            kept.append(session)
+            continue
+        clipped = dict(session)
+        new_end = start + timedelta(minutes=30 * slots)
+        tzinfo = parse_dt(session["end"]).tzinfo
+        clipped["end"] = (new_end.astimezone(tzinfo) if tzinfo is not None else new_end).isoformat()
+        clipped["duration_hours"] = slots / 2
+        kept.append(clipped)
+    return kept
 
 
 def compute_hours_remaining(future_sessions: list[dict], active_session: dict | None, now_dt: datetime) -> float:

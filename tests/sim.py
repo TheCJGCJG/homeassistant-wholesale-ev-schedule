@@ -16,6 +16,7 @@ the way the Octopus integration exposes them (GBP/kWh, x100 by the integration).
 from __future__ import annotations
 
 import json
+import math
 import random
 from dataclasses import dataclass, field
 from datetime import UTC, datetime, timedelta
@@ -505,6 +506,41 @@ def check_invariants(sim: Sim, tick: Tick) -> None:
                 continue
             assert end <= tick.ready_by, f"{ctx} required session ends after ready_by: {sess} ready_by={tick.ready_by}"
             assert sess["avg_price"] <= c.max_price + 1e-6, f"{ctx} session over max_price {c.max_price}: {sess}"
+
+    # what is reported as "next"/"active" is what the session list says
+    data = sim.data
+    upcoming = [iv for iv in intervals if iv[0] > now]
+    if tick.state in ("scheduled", "charging", "boosting", "error"):
+        if upcoming:
+            assert data["next_slot"] is not None, f"{ctx} next_slot missing"
+            assert parse_dt(data["next_slot"]["start"]) == min(s for s, _, _ in upcoming), f"{ctx} wrong next_slot"
+        else:
+            assert data["next_slot"] is None, f"{ctx} next_slot reported with nothing upcoming"
+        if active:
+            assert data["active_slot"] is not None and parse_dt(data["active_slot"]["start"]) == active[0][0], (
+                f"{ctx} active_slot does not match the running session"
+            )
+        else:
+            assert data["active_slot"] is None, f"{ctx} active_slot reported with nothing running"
+    assert data["block_count"] == len(data["sessions"]), f"{ctx} block_count out of step with sessions"
+    ordered = [parse_dt(s["start"]) for s in data["upcoming_slots"]]
+    assert ordered == sorted(ordered), f"{ctx} upcoming_slots out of order"
+
+    # A freshly computed plan keeps full blocks together: at most one stretch of consecutive
+    # required sessions is shorter than the minimum block (capped at what was needed in total).
+    if tick.state == "scheduled" and not sim.setting_edits and not active:
+        groups: list[list] = []
+        for start, end, _ in sorted(
+            (iv for iv in intervals if iv[2].get("tier", "required") == "required"), key=lambda iv: iv[0]
+        ):
+            if groups and groups[-1][1] >= start:
+                groups[-1][1] = max(groups[-1][1], end)
+            else:
+                groups.append([start, end])
+        total_slots = sum((end - start).total_seconds() for start, end in groups) / 1800
+        floor_slots = min(max(1, math.ceil(c.min_block_hours * 2)), total_slots)
+        short = [g for g in groups if (g[1] - g[0]).total_seconds() / 1800 < floor_slots]
+        assert len(short) <= 1, f"{ctx} several blocks shorter than the minimum: {groups}"
 
     # stored state must always be serialisable
     json.dumps(c._stored_sessions)

@@ -107,6 +107,7 @@ from .scheduler import (
     deduplicate_and_sort_prices,
     determine_state,
     find_optimal_slots,
+    fit_future_sessions,
     next_ready_by,
     parse_dt,
     prune_and_classify,
@@ -791,6 +792,38 @@ class WholesaleEvScheduleCoordinator(DataUpdateCoordinator[dict]):
                 self._delivered_hours += credit
         return clipped
 
+    def _fit_stored_sessions(self, now_dt: datetime) -> None:
+        """Make the stored plan respect the current settings without fresh prices.
+
+        With no price data the previous plan is replayed (an in-progress charge must not be
+        dropped just because a price source blinked -- issue #31), but replayed verbatim it would
+        ignore anything the user changes during the outage: lower the hours or pull the deadline
+        in and the old, longer plan would carry on. So the running block is clipped and the
+        upcoming ones trimmed to each tier's remaining allowance and deadline, exactly as a fresh
+        computation would have limited them.
+        """
+        self._accrue_delivered_hours(now_dt)
+        active, future = prune_and_classify(self._stored_sessions, now_dt)
+        active = self._clip_active_session(active, now_dt)
+        wanted = max(1, math.ceil(self.required_hours * 2))
+        limits = {
+            SESSION_TIER_REQUIRED: (
+                max(0, wanted - math.ceil(round(self._delivered_hours * 2, 6))),
+                self.ready_by,
+            ),
+            SESSION_TIER_OPPORTUNISTIC: (self._opportunistic_allowance_slots(), self.opportunistic_ready_by),
+        }
+        fitted = []
+        for tier, (allowed, deadline) in limits.items():
+            if active and active.get("tier", SESSION_TIER_REQUIRED) == tier:
+                start, end = parse_dt(active["start"]), parse_dt(active["end"])
+                allowed -= round((to_utc(end) - to_utc(start)).total_seconds() / 1800)
+            fitted += fit_future_sessions(
+                [s for s in future if s.get("tier", SESSION_TIER_REQUIRED) == tier], allowed, deadline
+            )
+        fitted.sort(key=lambda s: to_utc(parse_dt(s["start"])))
+        self._stored_sessions = ([active] if active else []) + fitted
+
     def _compute_sessions(self, all_prices: list[dict], now_dt: datetime) -> list[dict]:
         self._accrue_delivered_hours(now_dt)
         active_session, _ = prune_and_classify(self._stored_sessions, now_dt)
@@ -844,7 +877,9 @@ class WholesaleEvScheduleCoordinator(DataUpdateCoordinator[dict]):
             candidate_slots, required_future_dts, active_session, active_tier, now_dt
         )
 
-        return ([active_session] if active_session else []) + required_future_sessions + opportunistic_sessions
+        # Built tier by tier, but reported in the order they will happen.
+        upcoming = sorted(required_future_sessions + opportunistic_sessions, key=lambda s: to_utc(parse_dt(s["start"])))
+        return ([active_session] if active_session else []) + upcoming
 
     def _solve(
         self,
@@ -1037,6 +1072,10 @@ class WholesaleEvScheduleCoordinator(DataUpdateCoordinator[dict]):
             return self._idle_result(now_dt, price_summary)
 
         if not all_prices:
+            # Nothing to recompute from, so the stored plan stands in for one -- but it must still
+            # respect what the user has asked for since it was made.
+            self._fit_stored_sessions(now_dt)
+            await self._async_save_stored_state()
             return self._error_result("No price data available from configured entities", now_dt, price_summary)
 
         sessions = self._compute_sessions(all_prices, now_dt)

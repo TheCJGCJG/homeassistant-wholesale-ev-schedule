@@ -216,3 +216,67 @@ async def test_a_week_of_ordinary_operation_delivers_every_night_at_a_plausible_
     cycles = [m for _, m in sorted(sim.charged_minutes.items())][:-1]
     assert len(cycles) >= 6 and all(m == 180 for m in cycles), sim.charged_minutes
     assert sim.cost / 7 < 3 * 15  # always bought in the trough
+
+
+# ---------------------------------------------------------------------------
+# Edits made while prices are unavailable still apply to the plan being replayed
+# ---------------------------------------------------------------------------
+
+
+async def _stored_plan_during_outage(hass, freezer, **kwargs):
+    sim = await _sim(hass, freezer, feeds=("actual", "forecast"), start="2026-03-02 16:00:00+00:00", **kwargs)
+    await sim.run_to(_at(3, 0, 40))
+    sim.outage("actual")
+    sim.outage("forecast")
+    await sim.step(5)
+    assert sim.data["state"] == "error"
+    return sim
+
+
+def _planned_hours(sim):
+    now = sim.now
+    return sum(
+        max(0.0, (parse_dt(s["end"]) - max(parse_dt(s["start"]), now)).total_seconds()) / 3600
+        for s in sim.data["sessions"]
+    )
+
+
+async def test_lowering_the_hours_during_an_outage_trims_the_plan_that_is_being_replayed(hass, freezer):
+    sim = await _stored_plan_during_outage(hass, freezer, min_block_hours=2.0, required_hours=3.0)
+    assert _planned_hours(sim) > 1.0
+
+    await sim.act(sim.coordinator.async_set_required_hours(1.0))
+
+    assert sim.data["state"] == "error"
+    assert _planned_hours(sim) <= 1.0
+    await sim.run_to(_at(3, 6))
+    assert sim.on_minutes(_at(3, 0), _at(3, 6)) <= 60 + 5
+
+
+async def test_pulling_the_deadline_in_during_an_outage_trims_the_replayed_plan(hass, freezer):
+    sim = await _stored_plan_during_outage(hass, freezer, min_block_hours=0.5, required_hours=3.0)
+    deadline = _at(3, 2)
+
+    await sim.act(sim.coordinator.async_set_ready_by(deadline))
+
+    for s in sim.data["sessions"]:
+        assert parse_dt(s["end"]) <= deadline
+
+
+async def test_the_trimmed_plan_survives_a_restart_during_the_outage(hass, freezer):
+    sim = await _stored_plan_during_outage(hass, freezer, min_block_hours=2.0, required_hours=3.0)
+    await sim.act(sim.coordinator.async_set_required_hours(1.0))
+    before = sim.snapshot()
+
+    await sim.restart()
+
+    assert sim.snapshot()["sessions"] == before["sessions"]
+    assert _planned_hours(sim) <= 1.0
+
+
+async def test_stopping_during_an_outage_clears_the_replayed_plan(hass, freezer):
+    sim = await _stored_plan_during_outage(hass, freezer, min_block_hours=2.0, required_hours=3.0)
+
+    await sim.act(sim.coordinator.async_stop())
+
+    assert sim.data["state"] == "idle" and sim.data["sessions"] == [] and sim.data["desired"] is False
