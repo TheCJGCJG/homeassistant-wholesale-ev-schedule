@@ -242,7 +242,7 @@ the attribute/key names and multiplier directly.
 
 ## Testing
 
-All tests run inside Docker (`public.ecr.aws/docker/library/python:trixie`), in parallel (`-n auto`, via pytest-xdist; use `-n 0` to debug one test):
+All tests run inside Docker (`python:trixie` from Docker Hub), in parallel (`-n auto`, via pytest-xdist; use `-n 0` to debug one test):
 
 ```bash
 ./run-tests.sh              # run tests
@@ -356,7 +356,7 @@ no manifest changes needed. To regenerate after editing the SVG:
 
 ```bash
 docker run --rm -v "$(pwd)/custom_components/wholesale_ev_schedule:/work" \
-  public.ecr.aws/docker/library/python:trixie \
+  python:trixie \
   bash -c "apt-get update -qq && apt-get install -y -qq librsvg2-bin && \
     rsvg-convert -w 256 -h 256 /work/logo.svg -o /work/brand/icon.png && \
     rsvg-convert -w 512 -h 512 /work/logo.svg -o /work/brand/icon@2x.png && \

@@ -1,4 +1,4 @@
-FROM public.ecr.aws/docker/library/python:trixie
+FROM python:trixie
 
 WORKDIR /app
 
