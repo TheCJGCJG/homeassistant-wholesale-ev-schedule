@@ -11,7 +11,10 @@ conventions this file doesn't repeat.
 custom_components/wholesale_ev_schedule/
   scheduler.py      pure scheduling algorithm, no HA dependency
   coordinator.py    reads price/charger entities, runs scheduler.py, persists state
-  providers.py      registry of known price-source shapes (Octopus Energy, AgilePredict)
+  providers.py      registry of known price-source shapes (Octopus Energy, AgilePredict,
+                    Agile Rates API) for the rates, forecast and short-range forecast slots
+  price_parsing.py  pure helpers for reading price points out of attributes (dotted key
+                    paths, estimate flags) -- no HA dependency, like scheduler.py
   config_flow.py    multi-step setup + options: name, poll interval, providers
   entity.py         shared base — forces the <prefix>_ entity_id namespace
   sensor.py         primary + diagnostic (hidden-by-default) output sensors
@@ -72,6 +75,32 @@ custom_components/wholesale_ev_schedule/
   the coordinator notifies listeners at the end of `async_refresh`. It lives on the
   sensor (`native_value`), not in `data["state"]`, so `scheduler.determine_state`
   stays pure and `charging_desired` is untouched while it's showing.
+- **Short-range forecast (issue #54) is a per-slot precedence, not a blend.** A third,
+  optional price source (`CONF_SHORT_RANGE_*`, `SHORT_RANGE_PROVIDERS`) for a source that
+  is more accurate than the long-range forecast but covers fewer days (originally the
+  agilerates.uk day-ahead estimates, ~10:00 -> final ~16:00). Slots are tagged
+  `SOURCE_SHORT_RANGE` (still an estimate) or `SOURCE_SHORT_RANGE_FINAL` (the source's own
+  per-point flag says it is final); `scheduler._SOURCE_RANK` is the single table deciding
+  which source wins a slot (actual < short-range final < short-range estimate < forecast;
+  equal ranks keep the first), replacing the scattered `("current_actual", "next_actual")`
+  checks. Averaging was rejected: when one source is much better, a blend drags it towards
+  the worse one, and weights can't be justified without measured forecast-vs-final error.
+  Estimates get a fixed `base_credibility` stamped on each slot by the coordinator
+  (configured confidence, replacing horizon decay; gamble tolerance still applies via
+  `compute_effective_price`); finals take the normal actual tier. `slots_to_sessions` adds
+  `estimated` (any non-actual-tier slot) so automations can tell a firm plan from a
+  tentative one. Three things are deliberate: (1) an entry with no `CONF_SHORT_RANGE_*`
+  keys -- every entry from before the feature -- must behave identically, so
+  `_short_range_spec` returns None unless a non-"none" provider **and** an entity are set
+  (the options flow leaves stale keys behind when switching back to "none"), and the new
+  first-screen dropdown defaults to "none"; (2) a missing/unrecognised estimate flag reads
+  as an *estimate* (`price_parsing.is_estimate`) because trusting a still-moving price is
+  worse than distrusting a final one; (3) `price_parsing.resolve_key` tries a literal key
+  before treating it as a dotted path, so an existing custom config whose flat key
+  contains a dot still resolves as before. The three price sources share one parser
+  (`_parse_points`, driven by a `PointSpec`) rather than a copy each. The solve cache
+  (`_solve`) already keys on tier/effective price, so a source flipping from estimate to
+  final invalidates it with no extra wiring (`tests/test_short_range_forecast.py` pins it).
 - **There's no live `max_block_hours` entity** — it was removed as an
   unnecessary second knob (it only ever capped window *selection* size
   without guaranteeing an actual rest period; genuine multi-block scheduling
@@ -207,6 +236,10 @@ What each test file covers:
 - `tests/test_block_and_price_constraints.py` — min-block and max_price as guarantees on the returned schedule, across all three algorithms, plus seeded randomised invariants.  Guards the top-up step: remainders must be one contiguous, under-`max_price` window, never scattered single slots
 - `tests/test_calculating_state.py` — the state sensor shows `calculating` mid-recompute for every user-edit path (not periodic refreshes), never flips `charging_desired`, and always clears, even if the refresh fails
 - `tests/test_solve_cache.py` — the solve memo: unchanged refreshes/minute ticks don't re-solve, every input that can change the answer (settings, prices, slot boundary, per-slot fields) forces one, opportunistic-only edits re-solve only that tier, and a seeded random sequence of edits/clock moves always equals an uncached recompute
+- `tests/test_price_parsing_helpers.py` — pure unit tests for `price_parsing.py`: dotted-path resolution (literal-key-wins, malformed/non-mapping/empty-segment inputs, read-only mappings, falsy values) and the conservative estimate-flag interpretation
+- `tests/test_short_range_scheduler.py` — pure scheduler coverage for the short-range tier: the full source-precedence matrix in both input orders, ties, unknown sources, per-slot coverage gaps, the credibility override and its clamping, `estimated`/`confidence` on sessions, and end-to-end ranking with every algorithm
+- `tests/test_short_range_forecast.py` — coordinator-level behaviour against a real entry: entries that never opted in are untouched (incl. stale keys), parsing of the real Agile Rates API shape and every malformed-row case, DST 23/25-hour days (the 25-hour autumn merge is a strict `xfail` for a pre-existing, provider-independent dedupe bug), precedence over the real feeds, what gets scheduled (including the 10:00 -> 16:00 estimate->final transition), fallback when the entity vanishes, the opportunistic tier, diagnostics, and solve-cache interplay
+- `tests/test_short_range_config_flow.py` — the new dropdown/steps/validation, routing with the other providers, the options-flow guarantees for existing installs (re-saving untouched changes nothing else; opting in/out; switching provider clears the old flag key; the #38-style stale-`None` entity), legacy option shapes of every era still setting up, and a structural check that every step/field has strings in both `strings.json` and `translations/en.json`
 - `tests/test_optimization_algorithm.py` — the optimization_algorithm select entity: default value, persistence via the select entity, survival across restarts, an invalid stored value degrading to greedy, reset restoring the default
 - `tests/test_integration_smoke.py` — full config/options flow, entity registration, idle vs error state on a fresh setup given the new defaults
 - `tests/test_providers.py` — custom rates/forecast provider branches, "no forecast" branch, blank custom attribute/key fields rejected, re-enabling forecast after "none"

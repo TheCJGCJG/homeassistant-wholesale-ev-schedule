@@ -1,7 +1,8 @@
 """Config flow for Wholesale EV Schedule.
 
-Steps: user/init (name + poll interval + pick a rates/forecast provider) -> a
-provider-specific rates step -> a provider-specific forecast step (or none).
+Steps: user/init (name + poll interval + pick a rates/forecast/short-range
+provider) -> a provider-specific rates step -> a provider-specific forecast step
+(or none) -> a provider-specific short-range forecast step (or none, the default).
 Picking a named provider (see providers.py) fills in its attribute/key shape
 automatically; picking "custom" asks for it directly, so an unmodelled
 wholesale price source can still be wired up.
@@ -55,8 +56,20 @@ from .const import (
     CONF_RATE_VALUE_KEY,
     CONF_RATES_ATTRIBUTE,
     CONF_RATES_PROVIDER,
+    CONF_SHORT_RANGE_ATTRIBUTE,
+    CONF_SHORT_RANGE_CONFIDENCE,
+    CONF_SHORT_RANGE_DATETIME_KEY,
+    CONF_SHORT_RANGE_ENTITY,
+    CONF_SHORT_RANGE_ESTIMATE_FLAG_KEY,
+    CONF_SHORT_RANGE_PRICE_KEY,
+    CONF_SHORT_RANGE_PROVIDER,
+    CONF_SHORT_RANGE_UNIT_MULTIPLIER,
     CONF_UPDATE_INTERVAL_MINUTES,
     DEFAULT_ENABLE_OPPORTUNISTIC_CHARGING,
+    DEFAULT_FORECAST_ATTRIBUTE,
+    DEFAULT_FORECAST_DATETIME_KEY,
+    DEFAULT_FORECAST_PRICE_KEY,
+    DEFAULT_FORECAST_UNIT_MULTIPLIER,
     DEFAULT_GAMBLE_TOLERANCE,
     DEFAULT_MAX_PRICE,
     DEFAULT_MIN_BLOCK_HOURS,
@@ -68,6 +81,7 @@ from .const import (
     DEFAULT_READY_BY_DAY_OFFSET,
     DEFAULT_READY_BY_HOUR,
     DEFAULT_REQUIRED_HOURS,
+    DEFAULT_SHORT_RANGE_CONFIDENCE,
     DEFAULT_UPDATE_INTERVAL_MINUTES,
     DOMAIN,
 )
@@ -79,6 +93,11 @@ from .providers import (
     RATE_PROVIDER_CUSTOM,
     RATE_PROVIDER_OCTOPUS_ENERGY,
     RATE_PROVIDERS,
+    SHORT_RANGE_PROVIDER_AGILE_PREDICT,
+    SHORT_RANGE_PROVIDER_AGILE_RATES_API,
+    SHORT_RANGE_PROVIDER_CUSTOM,
+    SHORT_RANGE_PROVIDER_NONE,
+    SHORT_RANGE_PROVIDERS,
 )
 
 
@@ -152,6 +171,11 @@ def base_schema(defaults: dict[str, Any], include_name: bool) -> vol.Schema:
             ),
             _with_default(CONF_FORECAST_PROVIDER, defaults, FORECAST_PROVIDER_AGILE_PREDICT): _provider_select(
                 FORECAST_PROVIDERS
+            ),
+            # Optional (issue #54), default "none": an entry saved before this field
+            # existed reopens showing "None", and saving it unchanged adds no behaviour.
+            _with_default(CONF_SHORT_RANGE_PROVIDER, defaults, SHORT_RANGE_PROVIDER_NONE): _provider_select(
+                SHORT_RANGE_PROVIDERS
             ),
             # Setup-time defaults: what a fresh install starts with and what the
             # "Reset" button restores every live value to — not the live values
@@ -262,6 +286,55 @@ def forecast_custom_schema(defaults: dict[str, Any]) -> vol.Schema:
     )
 
 
+_SHORT_RANGE_CONFIDENCE_SELECTOR = selector.NumberSelector(
+    selector.NumberSelectorConfig(min=0, max=100, step=1, mode=selector.NumberSelectorMode.BOX)
+)
+
+
+def _short_range_entity_field(defaults: dict[str, Any]) -> tuple[vol.Required, selector.EntitySelector]:
+    return _required(CONF_SHORT_RANGE_ENTITY, defaults), selector.EntitySelector(
+        selector.EntitySelectorConfig(domain="sensor")
+    )
+
+
+def short_range_profile_schema(defaults: dict[str, Any]) -> vol.Schema:
+    """Entity + confidence, for any named short-range provider (its key shape comes
+    from providers.py, not the user)."""
+    entity_key, entity_selector = _short_range_entity_field(defaults)
+    return vol.Schema(
+        {
+            entity_key: entity_selector,
+            _with_default(
+                CONF_SHORT_RANGE_CONFIDENCE, defaults, DEFAULT_SHORT_RANGE_CONFIDENCE
+            ): _SHORT_RANGE_CONFIDENCE_SELECTOR,
+        }
+    )
+
+
+def short_range_custom_schema(defaults: dict[str, Any]) -> vol.Schema:
+    entity_key, entity_selector = _short_range_entity_field(defaults)
+    return vol.Schema(
+        {
+            entity_key: entity_selector,
+            _with_default(CONF_SHORT_RANGE_ATTRIBUTE, defaults, DEFAULT_FORECAST_ATTRIBUTE): _NON_BLANK_STR,
+            _with_default(CONF_SHORT_RANGE_DATETIME_KEY, defaults, DEFAULT_FORECAST_DATETIME_KEY): _NON_BLANK_STR,
+            _with_default(CONF_SHORT_RANGE_PRICE_KEY, defaults, DEFAULT_FORECAST_PRICE_KEY): _NON_BLANK_STR,
+            _with_default(
+                CONF_SHORT_RANGE_UNIT_MULTIPLIER, defaults, DEFAULT_FORECAST_UNIT_MULTIPLIER
+            ): selector.NumberSelector(
+                selector.NumberSelectorConfig(min=0.01, max=1000, step=0.01, mode=selector.NumberSelectorMode.BOX)
+            ),
+            # Optional and may be left blank (= every price is an estimate).
+            vol.Optional(
+                CONF_SHORT_RANGE_ESTIMATE_FLAG_KEY, default=defaults.get(CONF_SHORT_RANGE_ESTIMATE_FLAG_KEY) or ""
+            ): str,
+            _with_default(
+                CONF_SHORT_RANGE_CONFIDENCE, defaults, DEFAULT_SHORT_RANGE_CONFIDENCE
+            ): _SHORT_RANGE_CONFIDENCE_SELECTOR,
+        }
+    )
+
+
 class _ProviderStepsMixin:
     """Steps shared by the initial config flow and the options flow, from the
     rates-provider branch through to the forecast step. Subclasses implement
@@ -306,7 +379,7 @@ class _ProviderStepsMixin:
         forecast_provider = state[CONF_FORECAST_PROVIDER]
         if forecast_provider == FORECAST_PROVIDER_NONE:
             state[CONF_FORECAST_ENTITY] = None
-            return await self._async_finish(state)
+            return await self._async_after_forecast_step()
         if forecast_provider == FORECAST_PROVIDER_CUSTOM:
             return await self.async_step_forecast_custom()
         return await self.async_step_forecast_agile_predict()
@@ -320,7 +393,7 @@ class _ProviderStepsMixin:
             state[CONF_FORECAST_DATETIME_KEY] = profile["datetime_key"]
             state[CONF_FORECAST_PRICE_KEY] = profile["price_key"]
             state[CONF_FORECAST_UNIT_MULTIPLIER] = profile["unit_multiplier"]
-            return await self._async_finish(state)
+            return await self._async_after_forecast_step()
 
         return self.async_show_form(step_id="forecast_agile_predict", data_schema=forecast_agile_predict_schema(state))
 
@@ -328,9 +401,58 @@ class _ProviderStepsMixin:
         state = self._provider_state()
         if user_input is not None:
             state.update(user_input)
-            return await self._async_finish(state)
+            return await self._async_after_forecast_step()
 
         return self.async_show_form(step_id="forecast_custom", data_schema=forecast_custom_schema(state))
+
+    async def _async_after_forecast_step(self):
+        state = self._provider_state()
+        provider = state.get(CONF_SHORT_RANGE_PROVIDER, SHORT_RANGE_PROVIDER_NONE)
+        if provider == SHORT_RANGE_PROVIDER_NONE:
+            state[CONF_SHORT_RANGE_ENTITY] = None
+            return await self._async_finish(state)
+        steps = {
+            SHORT_RANGE_PROVIDER_AGILE_RATES_API: self.async_step_short_range_agile_rates_api,
+            SHORT_RANGE_PROVIDER_AGILE_PREDICT: self.async_step_short_range_agile_predict,
+            SHORT_RANGE_PROVIDER_CUSTOM: self.async_step_short_range_custom,
+        }
+        return await steps[provider]()
+
+    async def _async_short_range_profile_step(self, provider: str, user_input: dict[str, Any] | None):
+        """Shared body of the named-provider steps: the user supplies only the entity and
+        confidence; the key shape comes from the provider's profile. The step id is
+        `short_range_<provider>`, which is what strings.json is keyed on."""
+        state = self._provider_state()
+        if user_input is not None:
+            profile = SHORT_RANGE_PROVIDERS[provider]
+            state.update(user_input)
+            state[CONF_SHORT_RANGE_ATTRIBUTE] = profile["attribute"]
+            state[CONF_SHORT_RANGE_DATETIME_KEY] = profile["datetime_key"]
+            state[CONF_SHORT_RANGE_PRICE_KEY] = profile["price_key"]
+            state[CONF_SHORT_RANGE_UNIT_MULTIPLIER] = profile["unit_multiplier"]
+            # Not every profile has one; clear any left over from a previous provider.
+            state[CONF_SHORT_RANGE_ESTIMATE_FLAG_KEY] = profile.get("estimate_flag_key")
+            return await self._async_finish(state)
+
+        return self.async_show_form(step_id=f"short_range_{provider}", data_schema=short_range_profile_schema(state))
+
+    async def async_step_short_range_agile_rates_api(self, user_input: dict[str, Any] | None = None):
+        return await self._async_short_range_profile_step(SHORT_RANGE_PROVIDER_AGILE_RATES_API, user_input)
+
+    async def async_step_short_range_agile_predict(self, user_input: dict[str, Any] | None = None):
+        return await self._async_short_range_profile_step(SHORT_RANGE_PROVIDER_AGILE_PREDICT, user_input)
+
+    async def async_step_short_range_custom(self, user_input: dict[str, Any] | None = None):
+        state = self._provider_state()
+        if user_input is not None:
+            state.update(user_input)
+            # A blank optional field arrives as "" -- store it as "no flag key".
+            state[CONF_SHORT_RANGE_ESTIMATE_FLAG_KEY] = (
+                user_input.get(CONF_SHORT_RANGE_ESTIMATE_FLAG_KEY) or ""
+            ).strip() or None
+            return await self._async_finish(state)
+
+        return self.async_show_form(step_id="short_range_custom", data_schema=short_range_custom_schema(state))
 
 
 class WholesaleEvScheduleConfigFlow(_ProviderStepsMixin, ConfigFlow, domain=DOMAIN):

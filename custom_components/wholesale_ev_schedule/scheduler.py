@@ -21,7 +21,34 @@ OPTIMIZATION_ALGORITHM_GREEDY = "greedy"
 OPTIMIZATION_ALGORITHM_OPTIMAL = "optimal"
 OPTIMIZATION_ALGORITHM_HYBRID = "hybrid"
 
+# Where a price slot came from. coordinator.py tags every slot with one of these;
+# nothing here knows or cares which entity or provider produced it.
+SOURCE_CURRENT_ACTUAL = "current_actual"
+SOURCE_NEXT_ACTUAL = "next_actual"
+# A short-range forecast's prices, split by the source's own per-point flag: an
+# estimate (still moving, e.g. a day-ahead auction not yet final) or final (the
+# source says it will not change -- treated as actual-grade).
+SOURCE_SHORT_RANGE = "short_range"
+SOURCE_SHORT_RANGE_FINAL = "short_range_final"
+SOURCE_PREDICTED = "predicted"
+
+# Precedence when several sources price the same slot: lower rank wins, equal ranks
+# keep whichever came first. Real rates beat everything; a source's own final
+# prices beat its estimates, which beat the long-range forecast. A source this
+# table doesn't know ranks as the forecast, i.e. exactly as every non-actual
+# source did before short-range forecasts existed.
+_SOURCE_RANK = {
+    SOURCE_CURRENT_ACTUAL: 0,
+    SOURCE_NEXT_ACTUAL: 0,
+    SOURCE_SHORT_RANGE_FINAL: 1,
+    SOURCE_SHORT_RANGE: 2,
+    SOURCE_PREDICTED: 3,
+}
+_UNKNOWN_SOURCE_RANK = _SOURCE_RANK[SOURCE_PREDICTED]
+_ACTUAL_GRADE_SOURCES = frozenset({SOURCE_CURRENT_ACTUAL, SOURCE_NEXT_ACTUAL, SOURCE_SHORT_RANGE_FINAL})
+
 TIER_ACTUAL = "actual"
+TIER_SHORT_RANGE = "short_range"
 TIER_PREDICTED_0_24 = "predicted_0_24"
 TIER_PREDICTED_24_48 = "predicted_24_48"
 TIER_PREDICTED_48_72 = "predicted_48_72"
@@ -29,6 +56,11 @@ TIER_PREDICTED_72_PLUS = "predicted_72_plus"
 
 BASE_CREDIBILITY = {
     TIER_ACTUAL: 1.0,
+    # Fallback only: coordinator.py always stamps short-range slots with the
+    # user-configured confidence (a "base_credibility" field, see
+    # slot_base_credibility). Mirrors const.DEFAULT_SHORT_RANGE_CONFIDENCE, which
+    # this module can't import (see the module note on OPTIMIZATION_ALGORITHM_*).
+    TIER_SHORT_RANGE: 0.95,
     TIER_PREDICTED_0_24: 0.90,
     TIER_PREDICTED_24_48: 0.75,
     TIER_PREDICTED_48_72: 0.60,
@@ -38,8 +70,12 @@ BASE_CREDIBILITY = {
 
 def get_source_tier(source: str, slot_dt: datetime, now_dt: datetime) -> str:
     """Return credibility tier string for a price slot based on source and time horizon."""
-    if source in ("current_actual", "next_actual"):
+    if source in _ACTUAL_GRADE_SOURCES:
         return TIER_ACTUAL
+    if source == SOURCE_SHORT_RANGE:
+        # Deliberately horizon-independent: a short-range source exists because it is
+        # trusted over the long-range forecast at the distances it covers.
+        return TIER_SHORT_RANGE
     hours_ahead = (slot_dt - now_dt).total_seconds() / 3600
     if hours_ahead <= 24:
         return TIER_PREDICTED_0_24
@@ -50,7 +86,30 @@ def get_source_tier(source: str, slot_dt: datetime, now_dt: datetime) -> str:
     return TIER_PREDICTED_72_PLUS
 
 
-def compute_effective_price(raw_price: float, tier: str, gamble_tolerance: float) -> float:
+# A credibility of 0 would make compute_effective_price divide by zero at a gamble
+# tolerance of 0; this floor keeps the ranking finite (just extremely unattractive).
+_MIN_CREDIBILITY = 0.01
+
+
+def _resolve_base_credibility(tier: str, override: float | None) -> float:
+    """The tier's base credibility, or a per-slot `override` clamped to a usable
+    range. A missing or non-finite override falls back to the tier's own value
+    rather than propagating NaN into every price comparison."""
+    if override is None or not math.isfinite(override):
+        return BASE_CREDIBILITY[tier]
+    return max(_MIN_CREDIBILITY, min(1.0, override))
+
+
+def slot_base_credibility(slot: dict) -> float:
+    """A slot's base credibility: its own "base_credibility" override if it has one
+    (short-range slots do), otherwise its tier's. Single definition shared by
+    price ranking and the session `confidence` figure so the two can't drift."""
+    return _resolve_base_credibility(slot.get("tier", TIER_ACTUAL), slot.get("base_credibility"))
+
+
+def compute_effective_price(
+    raw_price: float, tier: str, gamble_tolerance: float, base_credibility: float | None = None
+) -> float:
     """Risk-adjusted price used for slot ranking. Low gamble_tolerance inflates predicted
     prices, favouring known actual rates; at 100 all prices are taken at face value.
 
@@ -60,9 +119,12 @@ def compute_effective_price(raw_price: float, tier: str, gamble_tolerance: float
     ranking (issue #41). Sufficiently below 0, eff_cred crosses zero and this
     function divides by it (issue #42). The live number entity already
     clamps to [0, 100], but a stored value can bypass that (see coordinator.py).
+
+    base_credibility, if given, replaces the tier's own base value (clamped to a
+    usable range) -- how a short-range source's configured confidence is applied.
     """
     gamble_tolerance = max(0.0, min(100.0, gamble_tolerance))
-    base_cred = BASE_CREDIBILITY[tier]
+    base_cred = _resolve_base_credibility(tier, base_credibility)
     eff_cred = base_cred + (1.0 - base_cred) * (gamble_tolerance / 100.0)
     return raw_price / eff_cred
 
@@ -72,7 +134,7 @@ def assign_credibilities(slots: list[dict], now_dt: datetime, gamble_tolerance: 
     result = []
     for slot in slots:
         tier = get_source_tier(slot["source"], slot["date_time"], now_dt)
-        eff_price = compute_effective_price(slot["raw_price"], tier, gamble_tolerance)
+        eff_price = compute_effective_price(slot["raw_price"], tier, gamble_tolerance, slot.get("base_credibility"))
         entry = dict(slot)
         entry["tier"] = tier
         entry["effective_price"] = eff_price
@@ -840,6 +902,10 @@ def slots_to_sessions(selected_slots: list[dict]) -> list[dict]:
 
     confidence (0-100) is the average base credibility of the slots in the session:
     100 = all actual rates, down to 40 for predictions more than 72h out.
+
+    estimated is True if any slot in the session is not an actual-grade price, i.e.
+    the block could still move when the real rates are published -- what to check
+    before acting on a block ("charge now or wait for tomorrow's rates").
     """
     if not selected_slots:
         return []
@@ -850,7 +916,7 @@ def slots_to_sessions(selected_slots: list[dict]) -> list[dict]:
         start = run[0]["date_time"]
         end = run[-1]["date_time"] + timedelta(minutes=30)
         avg_price = sum(s["raw_price"] for s in run) / len(run)
-        avg_cred = sum(BASE_CREDIBILITY.get(s.get("tier", TIER_ACTUAL), 1.0) for s in run) / len(run)
+        avg_cred = sum(slot_base_credibility(s) for s in run) / len(run)
         sessions.append(
             {
                 "start": start.isoformat(),
@@ -858,6 +924,7 @@ def slots_to_sessions(selected_slots: list[dict]) -> list[dict]:
                 "duration_hours": len(run) * 0.5,
                 "avg_price": round(avg_price, 2),
                 "confidence": round(avg_cred * 100, 1),
+                "estimated": any(s.get("tier", TIER_ACTUAL) != TIER_ACTUAL for s in run),
             }
         )
     return sessions
@@ -926,15 +993,21 @@ def compute_hours_remaining(future_sessions: list[dict], active_session: dict | 
     return total
 
 
+def _source_rank(source: str) -> int:
+    return _SOURCE_RANK.get(source, _UNKNOWN_SOURCE_RANK)
+
+
 def deduplicate_and_sort_prices(all_prices: list[dict], now_dt: datetime) -> list[dict]:
-    """Merge price data from all sources: actual rates win over predicted for the
-    same slot. Discards slots that have already ended, sorts the rest chronologically."""
+    """Merge price data from all sources: when several price the same slot the
+    best-ranked source wins (see _SOURCE_RANK -- actual rates, then a short-range
+    forecast's final prices, then its estimates, then the long-range forecast), and
+    equal ranks keep whichever came first. Discards slots that have already ended,
+    sorts the rest chronologically."""
     prices_by_dt: dict = {}
     for p in all_prices:
         dt = p["date_time"]
-        is_actual = p["source"] in ("current_actual", "next_actual")
         existing = prices_by_dt.get(dt)
-        if existing is None or is_actual and existing["source"] not in ("current_actual", "next_actual"):
+        if existing is None or _source_rank(p["source"]) < _source_rank(existing["source"]):
             prices_by_dt[dt] = p
 
     result = []

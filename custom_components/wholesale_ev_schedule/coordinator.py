@@ -42,6 +42,14 @@ from .const import (
     CONF_RATE_VALUE_KEY,
     CONF_RATES_ATTRIBUTE,
     CONF_RATES_PROVIDER,
+    CONF_SHORT_RANGE_ATTRIBUTE,
+    CONF_SHORT_RANGE_CONFIDENCE,
+    CONF_SHORT_RANGE_DATETIME_KEY,
+    CONF_SHORT_RANGE_ENTITY,
+    CONF_SHORT_RANGE_ESTIMATE_FLAG_KEY,
+    CONF_SHORT_RANGE_PRICE_KEY,
+    CONF_SHORT_RANGE_PROVIDER,
+    CONF_SHORT_RANGE_UNIT_MULTIPLIER,
     CONF_UPDATE_INTERVAL_MINUTES,
     DEFAULT_ASSUMED_CHARGE_KWH,
     DEFAULT_CHARGE_OVERRIDE,
@@ -64,6 +72,7 @@ from .const import (
     DEFAULT_READY_BY_DAY_OFFSET,
     DEFAULT_READY_BY_HOUR,
     DEFAULT_REQUIRED_HOURS,
+    DEFAULT_SHORT_RANGE_CONFIDENCE,
     DEFAULT_UPDATE_INTERVAL_MINUTES,
     DOMAIN,
     OPTIMIZATION_ALGORITHM_GREEDY,
@@ -75,8 +84,21 @@ from .const import (
     STATE_UNSCHEDULABLE,
     STORAGE_VERSION,
 )
-from .providers import FORECAST_PROVIDER_AGILE_PREDICT, FORECAST_PROVIDERS, RATE_PROVIDER_OCTOPUS_ENERGY, RATE_PROVIDERS
+from .price_parsing import PointSpec, is_estimate, resolve_key
+from .providers import (
+    FORECAST_PROVIDER_AGILE_PREDICT,
+    FORECAST_PROVIDERS,
+    RATE_PROVIDER_OCTOPUS_ENERGY,
+    RATE_PROVIDERS,
+    SHORT_RANGE_PROVIDER_NONE,
+    SHORT_RANGE_PROVIDERS,
+)
 from .scheduler import (
+    SOURCE_CURRENT_ACTUAL,
+    SOURCE_NEXT_ACTUAL,
+    SOURCE_PREDICTED,
+    SOURCE_SHORT_RANGE,
+    SOURCE_SHORT_RANGE_FINAL,
     TIER_ACTUAL,
     assign_credibilities,
     compute_hours_remaining,
@@ -107,6 +129,13 @@ _VALID_OPTIMIZATION_ALGORITHMS = {
 # charging existed -- an upgrade must never misroute or drop that state.
 SESSION_TIER_REQUIRED = "required"
 SESSION_TIER_OPPORTUNISTIC = "opportunistic"
+
+
+def _non_blank_text(value) -> str | None:
+    """`value` stripped, or None if it isn't a string or is blank -- for an optional
+    text option that may be stored as "", whitespace, None, or (from a hand-edited
+    entry) something that isn't text at all."""
+    return value.strip() or None if isinstance(value, str) else None
 
 
 class WholesaleEvScheduleCoordinator(DataUpdateCoordinator[dict]):
@@ -225,6 +254,15 @@ class WholesaleEvScheduleCoordinator(DataUpdateCoordinator[dict]):
     def forecast_provider_label(self) -> str:
         provider_id = self.entry.options.get(CONF_FORECAST_PROVIDER, FORECAST_PROVIDER_AGILE_PREDICT)
         return FORECAST_PROVIDERS.get(provider_id, {}).get("label", provider_id)
+
+    @property
+    def short_range_provider_label(self) -> str | None:
+        """The configured short-range provider's label, or None when it isn't in use
+        (so callers can leave it out entirely for an install that never opted in)."""
+        if self._short_range_spec() is None:
+            return None
+        provider_id = self.entry.options.get(CONF_SHORT_RANGE_PROVIDER, SHORT_RANGE_PROVIDER_NONE)
+        return SHORT_RANGE_PROVIDERS.get(provider_id, {}).get("label", provider_id)
 
     async def async_load_stored_state(self) -> None:
         """Restore live inputs and the in-progress schedule after a restart.
@@ -563,27 +601,73 @@ class WholesaleEvScheduleCoordinator(DataUpdateCoordinator[dict]):
             return None
         return entity
 
-    def _parse_rate_entity(self, entity_id: str | None, source_label: str) -> list[dict]:
+    def _rates_spec(self) -> PointSpec:
+        options = self._options
+        return PointSpec(
+            attribute=options.get(CONF_RATES_ATTRIBUTE, DEFAULT_RATES_ATTRIBUTE),
+            time_key=options.get(CONF_RATE_START_KEY, DEFAULT_RATE_START_KEY),
+            price_key=options.get(CONF_RATE_VALUE_KEY, DEFAULT_RATE_VALUE_KEY),
+            multiplier=float(options.get(CONF_RATE_UNIT_MULTIPLIER, DEFAULT_RATE_UNIT_MULTIPLIER)),
+        )
+
+    def _forecast_spec(self) -> PointSpec:
+        options = self._options
+        return PointSpec(
+            attribute=options.get(CONF_FORECAST_ATTRIBUTE, DEFAULT_FORECAST_ATTRIBUTE),
+            time_key=options.get(CONF_FORECAST_DATETIME_KEY, DEFAULT_FORECAST_DATETIME_KEY),
+            price_key=options.get(CONF_FORECAST_PRICE_KEY, DEFAULT_FORECAST_PRICE_KEY),
+            multiplier=float(options.get(CONF_FORECAST_UNIT_MULTIPLIER, DEFAULT_FORECAST_UNIT_MULTIPLIER)),
+        )
+
+    def _short_range_spec(self) -> PointSpec | None:
+        """The short-range forecast's parsing spec, or None when it isn't configured.
+
+        "Configured" needs both a non-"none" provider and an entity: the options flow
+        leaves stale short-range keys behind when switching back to "none" (the same
+        way it does for the long-range forecast), and an entry created before this
+        feature has no short-range keys at all -- both must read as simply off.
+        """
+        options = self._options
+        provider = options.get(CONF_SHORT_RANGE_PROVIDER, SHORT_RANGE_PROVIDER_NONE)
+        if provider == SHORT_RANGE_PROVIDER_NONE or not options.get(CONF_SHORT_RANGE_ENTITY):
+            return None
+        return PointSpec(
+            attribute=options.get(CONF_SHORT_RANGE_ATTRIBUTE, DEFAULT_FORECAST_ATTRIBUTE),
+            time_key=options.get(CONF_SHORT_RANGE_DATETIME_KEY, DEFAULT_FORECAST_DATETIME_KEY),
+            price_key=options.get(CONF_SHORT_RANGE_PRICE_KEY, DEFAULT_FORECAST_PRICE_KEY),
+            multiplier=float(options.get(CONF_SHORT_RANGE_UNIT_MULTIPLIER, DEFAULT_FORECAST_UNIT_MULTIPLIER)),
+            estimate_flag_key=_non_blank_text(options.get(CONF_SHORT_RANGE_ESTIMATE_FLAG_KEY)),
+        )
+
+    def _short_range_base_credibility(self) -> float:
+        """The configured short-range confidence as the 0-1 base credibility the
+        scheduler wants. An unparseable stored value degrades to the default rather
+        than failing the whole update; range clamping is the scheduler's job."""
+        try:
+            percent = float(self._options.get(CONF_SHORT_RANGE_CONFIDENCE, DEFAULT_SHORT_RANGE_CONFIDENCE))
+        except (TypeError, ValueError):
+            return DEFAULT_SHORT_RANGE_CONFIDENCE / 100.0
+        return percent / 100.0 if math.isfinite(percent) else DEFAULT_SHORT_RANGE_CONFIDENCE / 100.0
+
+    def _parse_points(self, entity_id: str | None, spec: PointSpec, source_for_point) -> list[dict]:
+        """Read one price source into slot dicts. `source_for_point(point)` tags each
+        slot with its scheduler.SOURCE_* label; malformed points are skipped (logged at
+        debug), never fatal -- one bad row must not take the whole update down."""
         entity = self._entity_state(entity_id)
         if not entity:
             return []
-        options = self._options
-        attribute = options.get(CONF_RATES_ATTRIBUTE, DEFAULT_RATES_ATTRIBUTE)
-        start_key = options.get(CONF_RATE_START_KEY, DEFAULT_RATE_START_KEY)
-        value_key = options.get(CONF_RATE_VALUE_KEY, DEFAULT_RATE_VALUE_KEY)
-        multiplier = float(options.get(CONF_RATE_UNIT_MULTIPLIER, DEFAULT_RATE_UNIT_MULTIPLIER))
 
         slots = []
         # `.get(attribute, [])`'s default only applies when the key is absent -- an
         # explicit `None` (a real pattern for "not yet populated" attributes) would
-        # otherwise reach `for rate in None:` and crash the whole coordinator update.
-        for rate in entity.attributes.get(attribute) or []:
+        # otherwise reach `for point in None:` and crash the whole coordinator update.
+        for point in entity.attributes.get(spec.attribute) or []:
             try:
-                dt_val = rate.get(start_key)
-                price_val = rate.get(value_key)
-                if dt_val is None or price_val is None:
+                time_val = resolve_key(point, spec.time_key)
+                price_val = resolve_key(point, spec.price_key)
+                if time_val is None or price_val is None:
                     continue
-                slot_dt = dt_util.as_local(parse_dt(dt_val))
+                slot_dt = dt_util.as_local(parse_dt(time_val))
                 raw_price = float(price_val)
                 # float() accepts the strings "nan"/"inf" without error (unlike
                 # "N/A", which correctly raises below) -- treat as malformed the
@@ -595,59 +679,44 @@ class WholesaleEvScheduleCoordinator(DataUpdateCoordinator[dict]):
                 slots.append(
                     {
                         "date_time": slot_dt,
-                        "raw_price": round(raw_price * multiplier, 4),
-                        "source": source_label,
+                        "raw_price": round(raw_price * spec.multiplier, 4),
+                        "source": source_for_point(point),
                     }
                 )
             except (TypeError, ValueError, AttributeError) as err:
                 # AttributeError covers a non-dict row (e.g. the attribute shaped as
-                # a dict instead of a list, so `rate` is a plain str key) -- `.get()`
-                # on it raises AttributeError, not TypeError/ValueError (issue #32).
-                _LOGGER.debug("Skipping %s rate: %s", source_label, err)
+                # a dict instead of a list, so `point` is a plain str key) -- not
+                # TypeError/ValueError (issue #32).
+                _LOGGER.debug("Skipping malformed price point from %s: %s", entity_id, err)
         return slots
 
-    def _parse_forecast_entity(self, entity_id: str | None) -> list[dict]:
-        entity = self._entity_state(entity_id)
-        if not entity:
+    def _parse_short_range(self) -> list[dict]:
+        spec = self._short_range_spec()
+        if spec is None:
             return []
-        options = self._options
-        attribute = options.get(CONF_FORECAST_ATTRIBUTE, DEFAULT_FORECAST_ATTRIBUTE)
-        datetime_key = options.get(CONF_FORECAST_DATETIME_KEY, DEFAULT_FORECAST_DATETIME_KEY)
-        price_key = options.get(CONF_FORECAST_PRICE_KEY, DEFAULT_FORECAST_PRICE_KEY)
-        multiplier = float(options.get(CONF_FORECAST_UNIT_MULTIPLIER, DEFAULT_FORECAST_UNIT_MULTIPLIER))
 
-        slots = []
-        # See _parse_rate_entity -- `.get(attribute, [])`'s default only applies when
-        # the key is absent, not when it's explicitly `None`.
-        for point in entity.attributes.get(attribute) or []:
-            try:
-                dt_str = point.get(datetime_key)
-                price_val = point.get(price_key)
-                if dt_str is None or price_val is None:
-                    continue
-                slot_dt = dt_util.as_local(parse_dt(dt_str))
-                raw_price = float(price_val)
-                # See _parse_rate_entity -- reject non-finite floats (issue #33).
-                if not math.isfinite(raw_price):
-                    raise ValueError(f"non-finite price: {price_val!r}")
-                slots.append(
-                    {
-                        "date_time": slot_dt,
-                        "raw_price": round(raw_price * multiplier, 4),
-                        "source": "predicted",
-                    }
-                )
-            except (TypeError, ValueError, AttributeError) as err:
-                # See _parse_rate_entity -- AttributeError covers a non-dict row.
-                _LOGGER.debug("Skipping predicted price: %s", err)
+        def source_for_point(point) -> str:
+            if spec.estimate_flag_key is None or is_estimate(resolve_key(point, spec.estimate_flag_key)):
+                return SOURCE_SHORT_RANGE
+            return SOURCE_SHORT_RANGE_FINAL
+
+        slots = self._parse_points(self._options.get(CONF_SHORT_RANGE_ENTITY), spec, source_for_point)
+        # Only estimates carry the configured confidence; a point the source marks
+        # final is actual-grade and ranks at full confidence like any real rate.
+        confidence = self._short_range_base_credibility()
+        for slot in slots:
+            if slot["source"] == SOURCE_SHORT_RANGE:
+                slot["base_credibility"] = confidence
         return slots
 
     def _collect_prices(self) -> list[dict]:
         options = self._options
+        rates_spec = self._rates_spec()
         return (
-            self._parse_rate_entity(options.get(CONF_CURRENT_RATES_ENTITY), "current_actual")
-            + self._parse_rate_entity(options.get(CONF_NEXT_RATES_ENTITY), "next_actual")
-            + self._parse_forecast_entity(options.get(CONF_FORECAST_ENTITY))
+            self._parse_points(options.get(CONF_CURRENT_RATES_ENTITY), rates_spec, lambda _p: SOURCE_CURRENT_ACTUAL)
+            + self._parse_points(options.get(CONF_NEXT_RATES_ENTITY), rates_spec, lambda _p: SOURCE_NEXT_ACTUAL)
+            + self._parse_points(options.get(CONF_FORECAST_ENTITY), self._forecast_spec(), lambda _p: SOURCE_PREDICTED)
+            + self._parse_short_range()
         )
 
     def _accrue_delivered_hours(self, now_dt: datetime) -> None:

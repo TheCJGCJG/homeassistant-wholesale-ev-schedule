@@ -95,7 +95,12 @@ Schedule**. You'll be asked for:
    the same API shape — see the
    [AgilePredict HA guide](https://agilepredict.com/v2/api_how_to/)), "Custom"
    for something else, or "None" to schedule from known/actual rates only.
-5. **Optional defaults** — default charging hours required, default gamble
+5. **A short-range forecast** (optional, off by default) — a second,
+   *more accurate* forecast that only covers the next day or so, such as a
+   day-ahead estimate published before the real rates. See
+   [Short-range forecast](#short-range-forecast) below. Leave it as "None" and
+   nothing changes.
+6. **Optional defaults** — default charging hours required, default gamble
    tolerance, default maximum price, default minimum block length, and a
    default ready-by (an hour, plus "Next day" / "Next day + 1" / "Next day +
    2" / "Next day + 3" for how many days out it should land). These don't
@@ -104,7 +109,7 @@ Schedule**. You'll be asked for:
    restores those live values to. Leave them alone for the same behaviour as
    before (12h / 50% / 20 / 4h / next 7am). All are editable later from the
    integration's **Configure** option.
-6. **Enable opportunistic charging** (optional, off by default) — adds a
+7. **Enable opportunistic charging** (optional, off by default) — adds a
    second, opt-in charging tier; see
    [Opportunistic charging](#opportunistic-charging) below. Leave it off for
    the exact same behaviour as before this option existed — nothing changes
@@ -231,13 +236,79 @@ Opportunistic charging only ever fills slots the required tier didn't
 already claim, and never at the cost of the required floor being met — it's
 strictly additional, on top of, never instead of.
 
+## Short-range forecast
+
+Some services publish a day-ahead estimate that's much closer to the final
+price than a multi-day forecast, but only for the next day or so — and, before
+the real rates land, it's the best guess you have for tomorrow. The
+**short-range forecast** is an optional second forecast for exactly that: it's
+used wherever it has data, and your normal forecast (AgilePredict, Agile
+Forecast, …) covers everything beyond it.
+
+For each half-hour slot the best available price wins, in this order:
+
+1. **Actual rates** (your Octopus Energy entities) — always win.
+2. **Short-range prices the source marks as final** — treated like real rates.
+3. **Short-range estimates** — trusted at the *confidence* you set (default
+   95%) instead of the normal "the further out, the less I trust it" discount.
+4. **Your normal forecast** — fills in everywhere the short-range forecast has
+   no data.
+
+It's a per-slot choice, not an average: where the short-range forecast has a
+price it replaces the normal forecast's, and where it doesn't, nothing changes.
+
+**Setting it up:** pick a provider in setup (or **Configure** later) and
+select its sensor.
+
+- **Agile Rates API** — [agilerates.uk](https://agilerates.uk/api/) publishes
+  estimates from about 10:00 each morning (from the hourly day-ahead
+  auctions) and flags them as predictions until about 16:00, when the 30-minute
+  auction publishes the final rate. Create a REST sensor for your region (see
+  the site's [API page](https://agilerates.uk/api/) — polling every 15 minutes
+  is fine), then select it here:
+
+  ```yaml
+  sensor:
+    - platform: rest
+      resource: https://agilerates.uk/api/agile_rates_region_C.json  # your region letter
+      name: "Agile Rates API Data"
+      value_template: "{{ value_json.result }}"
+      scan_interval: 900
+      json_attributes:
+        - rates
+  ```
+
+- **AgilePredict-compatible** — for a second AgilePredict-style sensor. Every
+  price from it is treated as an estimate.
+- **Custom** — any sensor with an attribute holding a list of points. Key names
+  can be dotted paths into nested data (e.g. `agileRate.result.rate`). If the
+  source flags each point as an estimate or final, give the **is-estimate
+  flag** key (true = estimate, false = final); leave it blank to treat every
+  price as an estimate.
+
+**Confidence** (0–100) is how far to trust the source's *estimates*. Prices it
+marks final always count fully. Your **gamble tolerance** still applies on top,
+and at a gamble tolerance of 0 (actual rates only) estimates are ignored
+while final prices are still used.
+
+**Charge now, or wait for tomorrow?** Each session in the **Schedule** sensor
+has an `estimated` attribute — `true` if any slot in it is still an estimate
+(it could move when the real rates publish), `false` once it's made entirely of
+real or final prices. Use it in a notification or dashboard to tell a firm
+plan from a tentative one. If the short-range sensor goes unavailable, its
+data is simply skipped and you're back to your normal forecast.
+
+Your max price still applies to the short-range prices themselves, and nothing
+here adds entities or changes any existing behaviour unless you set it up.
+
 ## What you'll see
 
 - **State** — idle / scheduled / charging / boosting / complete /
   unschedulable / error, at a glance. Briefly shows `calculating` while a
   changed setting is being recomputed, then settles on the real state.
 - **Schedule** — the full list of upcoming charging sessions, with each
-  session's start/end time, average price, and confidence.
+  session's start/end time, average price, confidence, and whether it's still
+  `estimated` (see [Short-range forecast](#short-range-forecast)).
 - **Next slot start / end** — when the next charging session begins and ends.
 - **Next slot average price** / **Next slot estimated cost** — the average
   price of that upcoming session, and average price × assumed charge kWh as

@@ -95,6 +95,26 @@ CONF_FORECAST_ATTRIBUTE = "forecast_attribute"
 CONF_FORECAST_DATETIME_KEY = "forecast_datetime_key"
 CONF_FORECAST_PRICE_KEY = "forecast_price_key"
 
+# Config / options keys — short-range forecast (issue #54): an optional second
+# forecast that is more accurate but covers fewer days ahead than the one above, e.g.
+# a day-ahead estimate published before the real rates. Wherever it has data it
+# overrides the long-range forecast (actual rates still override it). Entirely
+# optional: none of these keys need exist, and an entry without them -- every entry
+# created before this feature -- behaves exactly as it always did.
+CONF_SHORT_RANGE_PROVIDER = "short_range_provider"
+CONF_SHORT_RANGE_ENTITY = "short_range_entity"
+CONF_SHORT_RANGE_ATTRIBUTE = "short_range_attribute"
+CONF_SHORT_RANGE_DATETIME_KEY = "short_range_datetime_key"
+CONF_SHORT_RANGE_PRICE_KEY = "short_range_price_key"
+CONF_SHORT_RANGE_UNIT_MULTIPLIER = "short_range_unit_multiplier"
+# Optional key locating a per-point "this price is still an estimate" flag; points
+# where it is falsy are treated as final (actual-grade). Unset = all estimates.
+CONF_SHORT_RANGE_ESTIMATE_FLAG_KEY = "short_range_estimate_flag_key"
+# 0-100, the same scale as gamble tolerance: how far to trust the short-range
+# forecast's *estimates*, in place of the long-range forecast's horizon-based decay.
+CONF_SHORT_RANGE_CONFIDENCE = "short_range_confidence"
+DEFAULT_SHORT_RANGE_CONFIDENCE = 95.0
+
 # Manual override for the charging_desired output — deliberately not tied to
 # any charger-specific "work state" entity, so this integration doesn't need
 # to know anything about your particular charger brand. Wire desired to
