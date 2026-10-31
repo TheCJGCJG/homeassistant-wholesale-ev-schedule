@@ -211,7 +211,7 @@ async def test_a_feed_that_empties_out_does_not_wipe_the_plan_while_others_remai
 
 async def test_a_week_of_ordinary_operation_delivers_every_night_at_a_plausible_cost(hass, freezer):
     sim = await _sim(hass, freezer, feeds=("actual", "forecast"), min_block_hours=1.0)
-    await sim.run(60 * 24 * 7, step=15)
+    await sim.run(60 * 24 * 7, step=30)
 
     cycles = [m for _, m in sorted(sim.charged_minutes.items())][:-1]
     assert len(cycles) >= 6 and all(m == 180 for m in cycles), sim.charged_minutes

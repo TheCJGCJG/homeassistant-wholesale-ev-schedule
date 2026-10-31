@@ -79,8 +79,15 @@ class PriceWorld:
     peak: float = 55.0
     noise: float = 2.5
     forecast_error_scale: float = 1.0  # 0 = a perfect forecast
+    _memo: dict = field(default_factory=dict, repr=False, compare=False)  # deterministic prices, computed once
 
     def true_price(self, slot: datetime) -> float:
+        key = ("true", self.seed, self.trough, self.cheap, self.mid, self.peak, self.noise, _slot_index(slot))
+        if key not in self._memo:
+            self._memo[key] = self._true_price(slot)
+        return self._memo[key]
+
+    def _true_price(self, slot: datetime) -> float:
         hour = slot.astimezone(UTC).hour + slot.astimezone(UTC).minute / 60
         if self.trough[0] <= hour < self.trough[1]:
             base = self.cheap
@@ -98,6 +105,13 @@ class PriceWorld:
         return rng.uniform(-amplitude, amplitude)
 
     def forecast_price(self, slot: datetime, now: datetime) -> float:
+        issued_idx = int(now.astimezone(UTC).timestamp() // (6 * 3600))
+        key = ("fc", self.seed, self.forecast_error_scale, _slot_index(slot), issued_idx, slot < published_through(now))
+        if key not in self._memo:
+            self._memo[key] = self._forecast_price(slot, now)
+        return self._memo[key]
+
+    def _forecast_price(self, slot: datetime, now: datetime) -> float:
         """Long-range forecast: issued every 6h, near-exact for already-published slots,
         drifting by up to ~12p at long range."""
         issued = now.astimezone(UTC).replace(hour=now.astimezone(UTC).hour // 6 * 6, minute=0, second=0, microsecond=0)

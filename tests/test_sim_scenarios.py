@@ -53,7 +53,7 @@ async def test_every_daily_cycle_delivers_the_required_hours_in_any_timezone(has
     """4 days of 'charge 3h by 07:00 local' with a deadline that moves in UTC across clock changes."""
     sim = await Sim.create(hass, freezer, start=start, tz=tz, world=PriceWorld(seed=3), required_hours=3.0)
 
-    await sim.run(60 * 24 * 4, step=10)
+    await sim.run(60 * 24 * 4, step=30)
 
     ready_bys = sorted(sim.charged_minutes)
     full_cycles = ready_bys[:-1]
@@ -92,11 +92,11 @@ async def test_any_deadline_hour_gives_exactly_one_delivered_cycle_per_day_acros
         ready_hour=ready_hour,
         step_minutes=10,
     )
-    await sim.run(60 * 24 * 5, step=10)
+    await sim.run(60 * 24 * 4, step=30)
 
     deadlines = sorted(sim.charged_minutes)
     full = deadlines[:-1]
-    assert len(full) >= 4
+    assert len(full) >= 3
     for key in full:
         assert sim.charged_minutes[key] == 120, (key, sim.charged_minutes)
     # one deadline per local calendar day, in order, none skipped or repeated

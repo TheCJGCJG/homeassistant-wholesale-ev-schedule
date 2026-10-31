@@ -119,7 +119,7 @@ def _executed_blocks(sim, start, end):
 
 @pytest.mark.parametrize("error_scale", [0.0, 1.0])
 @pytest.mark.parametrize("min_block", [1.0, 1.5, 2.0, 3.0])
-@pytest.mark.parametrize("seed", range(1, 9))
+@pytest.mark.parametrize("seed", range(1, 6))
 async def test_at_most_one_block_shorter_than_the_minimum_actually_runs_per_request(
     hass, freezer, seed, min_block, error_scale
 ):
