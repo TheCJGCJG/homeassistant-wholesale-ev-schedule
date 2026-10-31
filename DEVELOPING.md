@@ -57,50 +57,27 @@ custom_components/wholesale_ev_schedule/
   `_min_max_slots_per_block` and `_solve_with_per_run_costs`; added for #55
   (greedy can lose to a combination — often one larger window — whose
   combined total is cheaper than picking the single cheapest window first).
-- **Top-ups are validated, never "cheapest individual slots".** When whole blocks
-  can't make up the full requirement, the remainder is filled by `_best_topup`
-  (used by greedy and the DP algorithms): slots grown outward from the existing
-  blocks plus at most one contiguous window elsewhere, then checked on the blocks
-  they actually produce (≤1 block under `min_block_hours`, every block's average
-  ≤ `max_price`). The earlier version picked the cheapest leftover slots
-  independently, which scattered single 30-minute slots and ignored `max_price`
-  (found on a live install; pinned by `tests/test_block_and_price_constraints.py`).
-  Related: with a `max_price` and no `max_block_hours`, `_min_cost_for_run` tracks
-  real block length (bounded by the requested slot count) instead of collapsing
-  all "free" lengths into one state, because the cap is a whole-block average.
-- **`calculating` is a display-only state (`STATE_CALCULATING`).** `_async_recalculate`
-  (`coordinator.py`) wraps every user-edit refresh: it sets a flag, pushes listeners
-  so the state sensor reads `calculating`, then refreshes. The flag is cleared in a
-  `finally` inside `_async_update_data`, not after `async_refresh` returns, because
-  the coordinator notifies listeners at the end of `async_refresh`. It lives on the
-  sensor (`native_value`), not in `data["state"]`, so `scheduler.determine_state`
-  stays pure and `charging_desired` is untouched while it's showing.
-- **Short-range forecast (issue #54) is a per-slot precedence, not a blend.** A third,
-  optional price source (`CONF_SHORT_RANGE_*`, `SHORT_RANGE_PROVIDERS`) for a source that
-  is more accurate than the long-range forecast but covers fewer days (originally the
-  agilerates.uk day-ahead estimates, ~10:00 -> final ~16:00). Slots are tagged
-  `SOURCE_SHORT_RANGE` (still an estimate) or `SOURCE_SHORT_RANGE_FINAL` (the source's own
-  per-point flag says it is final); `scheduler._SOURCE_RANK` is the single table deciding
-  which source wins a slot (actual < short-range final < short-range estimate < forecast;
-  equal ranks keep the first), replacing the scattered `("current_actual", "next_actual")`
-  checks. Averaging was rejected: when one source is much better, a blend drags it towards
-  the worse one, and weights can't be justified without measured forecast-vs-final error.
-  Estimates get a fixed `base_credibility` stamped on each slot by the coordinator
-  (configured confidence, replacing horizon decay; gamble tolerance still applies via
-  `compute_effective_price`); finals take the normal actual tier. `slots_to_sessions` adds
-  `estimated` (any non-actual-tier slot) so automations can tell a firm plan from a
-  tentative one. Three things are deliberate: (1) an entry with no `CONF_SHORT_RANGE_*`
-  keys -- every entry from before the feature -- must behave identically, so
-  `_short_range_spec` returns None unless a non-"none" provider **and** an entity are set
-  (the options flow leaves stale keys behind when switching back to "none"), and the new
-  first-screen dropdown defaults to "none"; (2) a missing/unrecognised estimate flag reads
-  as an *estimate* (`price_parsing.is_estimate`) because trusting a still-moving price is
-  worse than distrusting a final one; (3) `price_parsing.resolve_key` tries a literal key
-  before treating it as a dotted path, so an existing custom config whose flat key
-  contains a dot still resolves as before. The three price sources share one parser
-  (`_parse_points`, driven by a `PointSpec`) rather than a copy each. The solve cache
-  (`_solve`) already keys on tier/effective price, so a source flipping from estimate to
-  final invalidates it with no extra wiring (`tests/test_short_range_forecast.py` pins it).
+- **The "last block may be short" relaxation is exact in `optimal`/`hybrid`, validated in
+  `greedy`.** The rules (`tests/oracle.py`): exactly `required` slots, all ending by
+  `ready_by`, all inside a contiguous run long enough to hold a minimum block, at most ONE
+  maximal group shorter than `min_block_hours` (wherever it falls), and every group's average
+  *raw* price within `max_price`. The DP algorithms build that allowance into the state
+  (`_min_cost_for_run` carries a "short block used" flag; `_solve_with_per_run_costs` is a
+  knapsack over runs with that flag), so they are exact -- proven against exhaustive
+  enumeration on tens of thousands of random markets (`tests/test_scheduler_oracle.py`). An
+  earlier version chose the cheapest full blocks first and then bolted on a top-up, which is
+  not exact: the best answer can use a dearer full block precisely so a lone cheap slot
+  elsewhere can be the short one (it lost to the true optimum on ~1% of small markets).
+  `greedy` can't do that, so it still fills a remainder with `_best_topup` (slots grown from
+  existing blocks plus at most one contiguous window, validated on the blocks they produce);
+  the original version picked the cheapest *individual* leftover slots, which scattered
+  1-slot blocks and ignored `max_price` (found on a live install, pinned by
+  `tests/test_block_and_price_constraints.py`). Related: with a `max_price` and no
+  `max_block_hours`, `_min_cost_for_run` tracks real block length (bounded by the requested
+  slot count) instead of collapsing all "free" lengths into one state, because the cap is a
+  whole-block average. `hybrid` currently returns the same answers as `optimal` (its
+  per-run size restriction turned out to bind only on `max_block_hours`, where it was a bug:
+  a block cap bounds each *block*, not how many blocks a run can hold).
 - **There's no live `max_block_hours` entity** — it was removed as an
   unnecessary second knob (it only ever capped window *selection* size
   without guaranteeing an actual rest period; genuine multi-block scheduling
