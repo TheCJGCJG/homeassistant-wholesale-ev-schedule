@@ -207,6 +207,13 @@ async def test_a_completely_empty_or_unrelated_storage_file_is_a_fresh_install(h
         await hass.async_block_till_done()
 
 
+@pytest.mark.parametrize("value", [*GARBAGE, -3, 1e12, 2.7, "3"])
+async def test_the_stored_short_block_count_is_always_a_small_non_negative_integer(hass, hass_storage, value):
+    coordinator = await _load(hass, hass_storage, {"short_blocks_used": value, "required_hours": 2.0})
+
+    assert isinstance(coordinator._short_blocks_used, int) and 0 <= coordinator._short_blocks_used <= 1000
+
+
 @pytest.mark.parametrize("value", [None, "yes", 1, 0, [], "", "false", True, False])
 async def test_the_stored_opportunistic_switch_is_always_a_real_boolean(hass, hass_storage, value):
     coordinator = await _load(hass, hass_storage, {"opportunistic_enabled": value})

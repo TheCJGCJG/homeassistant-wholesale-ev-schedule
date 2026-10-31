@@ -78,6 +78,7 @@ class PriceWorld:
     mid: float = 24.0
     peak: float = 55.0
     noise: float = 2.5
+    forecast_error_scale: float = 1.0  # 0 = a perfect forecast
 
     def true_price(self, slot: datetime) -> float:
         hour = slot.astimezone(UTC).hour + slot.astimezone(UTC).minute / 60
@@ -105,7 +106,8 @@ class PriceWorld:
         horizon_h = max(0.0, (slot - issued).total_seconds() / 3600)
         if slot < published_through(now):
             return self.true_price(slot)
-        return round(max(0.5, self.true_price(slot) + self._error(slot, issued, min(12.0, 1.0 + horizon_h * 0.12))), 2)
+        amplitude = min(12.0, 1.0 + horizon_h * 0.12) * self.forecast_error_scale
+        return round(max(0.5, self.true_price(slot) + self._error(slot, issued, amplitude)), 2)
 
     def short_range_price(self, slot: datetime) -> float:
         return round(max(0.5, self.true_price(slot) + self._error(slot, slot, 1.5)), 2)

@@ -218,3 +218,47 @@ def test_greedy_only_ever_returns_empty_when_nothing_is_schedulable(seed):
         result = find_optimal_slots(slots, required, ready_by, min_block_hours, max_price=cap, algorithm="greedy")
 
         assert bool(result) == (best is not None)
+
+
+# ---------------------------------------------------------------------------
+# avoid_short_block: when a short block has already been used, don't create another
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize("algorithm", ["greedy", "optimal", "hybrid"])
+@pytest.mark.parametrize("seed", range(20))
+def test_avoiding_short_blocks_gives_the_cheapest_schedule_without_one_and_only_falls_back_when_it_must(
+    seed, algorithm
+):
+    for instance in _instances(seed):
+        slots, ready_by, required, min_block_hours, cap, m, usable_dts = _case(instance)
+        strict, _ = cheapest_valid(slots, ready_by, required, min_block_hours, cap, max_short=0)
+        relaxed, _ = cheapest_valid(slots, ready_by, required, min_block_hours, cap, max_short=1)
+
+        result = find_optimal_slots(
+            slots, required, ready_by, min_block_hours, max_price=cap, algorithm=algorithm, avoid_short_block=True
+        )
+
+        if strict is not None:
+            assert result, "a schedule with no short block exists but was not found"
+            assert is_valid(result, usable_dts, required, m, cap, max_short=0)
+            assert cost(result) == pytest.approx(strict, abs=1e-9)
+        elif relaxed is not None:
+            assert result, "avoiding short blocks must never turn a schedulable market into an unschedulable one"
+            assert is_valid(result, usable_dts, required, m, cap, max_short=1)
+            if algorithm != "greedy":  # greedy's fallback is greedy: valid, but not guaranteed cheapest
+                assert cost(result) == pytest.approx(relaxed, abs=1e-9)
+            else:
+                assert cost(result) >= relaxed - 1e-9
+        else:
+            assert result == []
+
+
+def test_avoid_short_block_is_off_by_default_and_changes_nothing_then():
+    for instance in _instances(3):
+        slots, ready_by, required, min_block_hours, cap, *_ = _case(instance)
+        a = find_optimal_slots(slots, required, ready_by, min_block_hours, max_price=cap, algorithm="optimal")
+        b = find_optimal_slots(
+            slots, required, ready_by, min_block_hours, max_price=cap, algorithm="optimal", avoid_short_block=False
+        )
+        assert [s["date_time"] for s in a] == [s["date_time"] for s in b]

@@ -485,6 +485,7 @@ def _min_cost_for_run(
     min_slots_per_block: int,
     max_slots_per_block: int | None,
     max_price: float | None,
+    allow_short_block: bool = True,
 ) -> tuple[list[list[float]], list, list[list]]:
     """Exact DP over a single contiguous run: for every k in 0..k_cap, the minimum total
     effective-price cost of selecting exactly k of the run's slots as a union of disjoint
@@ -495,7 +496,7 @@ def _min_cost_for_run(
 
     Returns (costs, history, ends). costs[u][k] is the minimum cost using exactly u short
     blocks (u=0: none; u=1: one) and is math.inf if unreachable; the u=1 row exists only when
-    a short block is possible at all (min_slots_per_block > 1). history[t][u][k][state] is the
+    a short block is possible at all (min_slots_per_block > 1 and allow_short_block). history[t][u][k][state] is the
     backpointer made at run-index t, and ends[u][k] the (u, state) cell costs[u][k] was read
     from; _reconstruct_run_selection replays these to recover which slots were picked.
 
@@ -538,7 +539,7 @@ def _min_cost_for_run(
         hi = max(lo, k_cap)
     else:
         hi = max_slots_per_block
-    allow_short = lo > 1
+    allow_short = lo > 1 and allow_short_block
     num_u = 2 if allow_short else 1
 
     raw_prefix = [0.0]
@@ -748,6 +749,7 @@ def _find_optimal_slots_optimal(
     min_block_hours: float,
     max_price: float | None = None,
     max_block_hours: float | None = None,
+    allow_short_block: bool = True,
 ) -> list[dict]:
     """Exact version of find_optimal_slots (OPTIMIZATION_ALGORITHM_OPTIMAL): every
     contiguous run of eligible slots is solved exactly via _min_cost_for_run's DP
@@ -781,7 +783,7 @@ def _find_optimal_slots_optimal(
         return []
 
     per_run = [
-        _min_cost_for_run(run, required_slots, min_slots_per_block, max_slots_per_block, max_price)
+        _min_cost_for_run(run, required_slots, min_slots_per_block, max_slots_per_block, max_price, allow_short_block)
         for run in valid_runs
     ]
 
@@ -795,6 +797,7 @@ def _find_optimal_slots_hybrid(
     min_block_hours: float,
     max_price: float | None = None,
     max_block_hours: float | None = None,
+    allow_short_block: bool = True,
 ) -> list[dict]:
     """Narrowed-search version of find_optimal_slots (OPTIMIZATION_ALGORITHM_HYBRID):
     a fast pre-pass restricts each run's DP to a handful of representative block sizes
@@ -850,7 +853,9 @@ def _find_optimal_slots_hybrid(
         # largest representative size, keeping the DP's cost bounded independent of
         # required_slots when the run is much longer than any representative size.
         k_cap = max(candidate_sizes) if candidate_sizes else min_slots_per_block
-        per_run.append(_min_cost_for_run(run, k_cap, min_slots_per_block, max_slots_per_block, max_price))
+        per_run.append(
+            _min_cost_for_run(run, k_cap, min_slots_per_block, max_slots_per_block, max_price, allow_short_block)
+        )
 
     return _solve_with_per_run_costs(eligible, valid_runs, per_run, required_slots)
 
@@ -863,6 +868,7 @@ def find_optimal_slots(
     max_price: float | None = None,
     max_block_hours: float | None = None,
     algorithm: str = OPTIMIZATION_ALGORITHM_GREEDY,
+    avoid_short_block: bool = False,
 ) -> list[dict]:
     """Select the cheapest combination of slots totalling required_slots, where every
     contiguous block is >= min_block_hours and (if max_price given) each block's average
@@ -886,7 +892,22 @@ def find_optimal_slots(
     single cheapest option in the market genuinely is one long uninterrupted dip,
     capping the window size still results in back-to-back blocks with no gap between
     them, since there's no cost-based reason to leave a cheaper slot unpicked.
+
+    avoid_short_block: the one block allowed to be shorter than min_block_hours has
+    already been used by this request (it ran, or is running), so don't create another
+    if any alternative exists.
     """
+    if avoid_short_block:
+        # A short block (shorter than min_block_hours) has already been spent on this request, so
+        # prefer a schedule that needs none -- only fall back to allowing one if there is no other
+        # way, so this can never turn a schedulable market into an unschedulable one. Solved
+        # exactly whichever algorithm was asked for: the preference only bites in the rare case a
+        # short block was used, and an exact answer is what makes "no extra short block" reliable.
+        strict = _find_optimal_slots_optimal(
+            candidate_slots, required_slots, ready_by_dt, min_block_hours, max_price, max_block_hours, False
+        )
+        if strict:
+            return strict
     impl = _ALGORITHM_IMPLEMENTATIONS.get(algorithm, _find_optimal_slots_greedy)
     return impl(candidate_slots, required_slots, ready_by_dt, min_block_hours, max_price, max_block_hours)
 

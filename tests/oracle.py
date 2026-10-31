@@ -59,13 +59,13 @@ def usable(slots, ready_by, m):
     return out
 
 
-def is_valid(selection, usable_dts, required, m, cap, max_block=None):
+def is_valid(selection, usable_dts, required, m, cap, max_block=None, max_short=1):
     if len(selection) != required:
         return False
     if any(s["date_time"] not in usable_dts for s in selection):
         return False
     blocks = build_contiguous_runs(sorted(selection, key=lambda s: s["date_time"]))
-    if sum(1 for b in blocks if len(b) < m) > 1:
+    if sum(1 for b in blocks if len(b) < m) > max_short:
         return False
     if max_block is not None and any(len(b) > max_block for b in blocks):
         return False
@@ -78,7 +78,7 @@ def cost(selection) -> float:
     return sum(s["effective_price"] for s in selection)
 
 
-def cheapest_valid(slots, ready_by, required, min_block_hours, cap, max_block_hours=None):
+def cheapest_valid(slots, ready_by, required, min_block_hours, cap, max_block_hours=None, max_short=1):
     """(best_cost, best_selection) over all valid selections, or (None, None) if there is none."""
     m = min_slots(required, min_block_hours)
     max_block = max_slots(required, min_block_hours, max_block_hours)
@@ -86,7 +86,7 @@ def cheapest_valid(slots, ready_by, required, min_block_hours, cap, max_block_ho
     usable_dts = {s["date_time"] for s in pool}
     best, best_sel = None, None
     for combo in itertools.combinations(pool, required):
-        if is_valid(combo, usable_dts, required, m, cap, max_block):
+        if is_valid(combo, usable_dts, required, m, cap, max_block, max_short):
             c = cost(combo)
             if best is None or c < best - 1e-12:
                 best, best_sel = c, combo

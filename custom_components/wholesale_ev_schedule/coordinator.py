@@ -255,6 +255,12 @@ class WholesaleEvScheduleCoordinator(DataUpdateCoordinator[dict]):
         self._stored_sessions: list[dict] = []
         self._boost_end: datetime | None = None
         self._delivered_hours: float = 0.0
+        # How many blocks shorter than min_block_hours this request has already run. The plan may
+        # contain at most one such block, but a plan is only ever the remainder of the request: once
+        # a short block has run (or is running) the next solve must not be handed a fresh allowance,
+        # or every short block that runs would earn another and the minimum block length -- there
+        # to stop the charger cycling -- would not hold across a day. Reset with delivered hours.
+        self._short_blocks_used: int = 0
 
     @property
     def instance_name(self) -> str:
@@ -324,6 +330,9 @@ class WholesaleEvScheduleCoordinator(DataUpdateCoordinator[dict]):
         )
         self._delivered_hours = self._parse_stored_float(
             data.get("delivered_hours"), 0.0, "delivered_hours", (0.0, MAX_DELIVERED_HOURS)
+        )
+        self._short_blocks_used = round(
+            self._parse_stored_float(data.get("short_blocks_used"), 0.0, "short_blocks_used", (0.0, 1000.0))
         )
 
         # Opportunistic charging state. Anything but a real True degrades to False (the same "off
@@ -473,6 +482,7 @@ class WholesaleEvScheduleCoordinator(DataUpdateCoordinator[dict]):
                 "sessions": self._stored_sessions,
                 "boost_end": self._boost_end.isoformat() if self._boost_end else None,
                 "delivered_hours": self._delivered_hours,
+                "short_blocks_used": self._short_blocks_used,
                 "opportunistic_enabled": self.opportunistic_enabled,
                 "opportunistic_target_hours": self.opportunistic_target_hours,
                 "opportunistic_max_price": self.opportunistic_max_price,
@@ -498,12 +508,19 @@ class WholesaleEvScheduleCoordinator(DataUpdateCoordinator[dict]):
         if not math.isfinite(value):
             raise ServiceValidationError(f"{field_name} must be a finite number, got {value!r}")
 
+    def _reset_required_progress(self) -> None:
+        """Forget what the current request has delivered: a new target, a new deadline cycle, Stop
+        and Reset are all a fresh request, so neither the hours delivered nor the short blocks
+        already spent carry over."""
+        self._delivered_hours = 0.0
+        self._short_blocks_used = 0
+
     async def async_set_required_hours(self, value: float) -> None:
         self._reject_non_finite(value, "required_hours")
         self.required_hours = value
         # A new target starts fresh -- hours delivered under whatever the
         # previous required_hours was don't carry over and offset it.
-        self._delivered_hours = 0.0
+        self._reset_required_progress()
         await self._async_save_stored_state()
         await self._async_recalculate()
 
@@ -601,7 +618,7 @@ class WholesaleEvScheduleCoordinator(DataUpdateCoordinator[dict]):
         self._stored_sessions = []
         self._boost_end = None
         self.required_hours = 0.0
-        self._delivered_hours = 0.0
+        self._reset_required_progress()
         self.opportunistic_target_hours = 0.0
         self._delivered_opportunistic_hours = 0.0
         await self._async_save_stored_state()
@@ -645,7 +662,7 @@ class WholesaleEvScheduleCoordinator(DataUpdateCoordinator[dict]):
         self._delivered_opportunistic_hours = 0.0
         self._stored_sessions = []
         self._boost_end = None
-        self._delivered_hours = 0.0
+        self._reset_required_progress()
         await self._async_save_stored_state()
         await self._async_recalculate()
 
@@ -816,7 +833,18 @@ class WholesaleEvScheduleCoordinator(DataUpdateCoordinator[dict]):
                 self._delivered_opportunistic_hours += duration
             else:
                 self._delivered_hours += duration
+                self._count_if_short(session_slots(s))
         self._stored_sessions = still_pending
+
+    def _min_block_slots(self) -> int:
+        """The minimum block length in half-hours for this request, as the scheduler applies it:
+        capped at the whole requirement, since a request smaller than the minimum is one block."""
+        return min(max(1, math.ceil(self.min_block_hours * 2)), max(1, math.ceil(self.required_hours * 2)))
+
+    def _count_if_short(self, slots: int) -> None:
+        """Record a finished required block that ran for fewer than the minimum number of slots."""
+        if 0 < slots < self._min_block_slots():
+            self._short_blocks_used += 1
 
     def _opportunistic_allowance_slots(self) -> int:
         """Half-hours of opportunistic charging still wanted: none while it's switched off, has
@@ -848,6 +876,7 @@ class WholesaleEvScheduleCoordinator(DataUpdateCoordinator[dict]):
                 self._delivered_opportunistic_hours += credit
             else:
                 self._delivered_hours += credit
+                self._count_if_short(round(credit * 2))
         return clipped
 
     def _fit_stored_sessions(self, now_dt: datetime) -> None:
@@ -914,12 +943,17 @@ class WholesaleEvScheduleCoordinator(DataUpdateCoordinator[dict]):
         required_future_sessions = []
         required_future_dts: set = set()
         if slots_still_needed > 0:
+            # A short block already run, or running right now, has spent the one allowed.
+            short_spent = self._short_blocks_used >= 1 or (
+                active_tier == SESSION_TIER_REQUIRED and session_slots(active_session) < self._min_block_slots()
+            )
             required_future_slots = self._solve(
                 SESSION_TIER_REQUIRED,
                 candidate_slots,
                 slots_still_needed,
                 self.ready_by,
                 self.max_price,
+                avoid_short_block=short_spent,
             )
             required_future_dts = {s["date_time"] for s in required_future_slots}
             required_future_sessions = self._sessions_from_slots(required_future_slots, SESSION_TIER_REQUIRED)
@@ -941,6 +975,7 @@ class WholesaleEvScheduleCoordinator(DataUpdateCoordinator[dict]):
         required_slots: int,
         ready_by: datetime,
         max_price: float,
+        avoid_short_block: bool = False,
     ) -> list[dict]:
         """find_optimal_slots, skipped when nothing it reads has changed since this
         tier's previous call (issue #60).
@@ -962,6 +997,7 @@ class WholesaleEvScheduleCoordinator(DataUpdateCoordinator[dict]):
             self.min_block_hours,
             max_price,
             self.optimization_algorithm,
+            avoid_short_block,
             tuple((s["date_time"], s["raw_price"], s["effective_price"], s["tier"]) for s in candidate_slots),
         )
         cached = self._solve_cache.get(tier)
@@ -974,6 +1010,7 @@ class WholesaleEvScheduleCoordinator(DataUpdateCoordinator[dict]):
             self.min_block_hours,
             max_price=max_price,
             algorithm=self.optimization_algorithm,
+            avoid_short_block=avoid_short_block,
         )
         self._solve_cache[tier] = (key, frozenset(s["date_time"] for s in result))
         return result
@@ -1102,7 +1139,7 @@ class WholesaleEvScheduleCoordinator(DataUpdateCoordinator[dict]):
             # request -- hours delivered toward the previous deadline don't
             # carry over and offset the next one (see issue: hours_remaining
             # bouncing back up after a completed overnight session).
-            self._delivered_hours = 0.0
+            self._reset_required_progress()
             # opportunistic_ready_by always re-derives here, every time
             # required ready_by rolls forward -- this is the ONE place a live
             # edit to it (via async_set_opportunistic_ready_by) gets
