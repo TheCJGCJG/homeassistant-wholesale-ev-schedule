@@ -321,8 +321,11 @@ without it, every run would pip-install the entire
 `pytest-homeassistant-custom-component` dependency tree from scratch, since
 GitHub-hosted runners start with no Docker layer cache. With it, only a
 `requirements-*.txt` change actually triggers a real rebuild. `runs-on:
-ubuntu-latest` is already GitHub's smallest/cheapest hosted runner — there's
-no smaller tier to drop to.
+ubuntu-latest` is GitHub's standard hosted runner. The test suite is large
+(thousands of simulated-day tests) and runs in parallel with pytest-xdist
+(`-n auto --maxprocesses=4` in `pytest.ini`), so it scales with the runner's
+cores: keep the repository's runner size at the default (Settings → Actions →
+Runners) rather than shrinking it.
 
 `release` depends on `checks` and publishes a GitHub release (zipping
 `custom_components/wholesale_ev_schedule/`) whenever `manifest.json`'s

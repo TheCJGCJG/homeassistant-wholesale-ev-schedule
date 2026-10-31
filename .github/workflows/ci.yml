@@ -16,7 +16,7 @@ jobs:
   # the same build. Cheapest/fastest checks run first so a lint failure exits
   # before paying for a full pytest run.
   checks:
-    runs-on: ubuntu-latest # smallest/cheapest GitHub-hosted runner available
+    runs-on: ubuntu-latest # standard GitHub-hosted runner; the suite runs in parallel (pytest-xdist, up to 4 workers), so core count matters
     steps:
       - uses: actions/checkout@v4
 
