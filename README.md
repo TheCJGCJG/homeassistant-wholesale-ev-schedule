@@ -50,7 +50,9 @@ predicted price points works.
 ## Requirements
 
 - Home Assistant 2026.3 or later.
-- A wholesale/half-hourly price source. Currently built in:
+- A wholesale price source. Half-hourly is native (Octopus Agile); regular hourly and sub-half-hourly
+  (15, 10 or 5 minute) feeds are converted onto the half-hour grid automatically — hourly prices cover
+  both halves of the hour, finer prices are averaged. Currently built in:
   - **[Octopus Energy](https://github.com/BottlecapDave/HomeAssistant-OctopusEnergy)** integration (for actual, known rates)
   - **[AgilePredict](https://agilepredict.com/v2/api_how_to/)** or any API-compatible source (e.g. Agile Forecast) (for a price forecast beyond what's known yet — optional, improves scheduling further ahead)
   - Anything else can be wired up via the "Custom" option in setup — see [Setup](#setup) below.

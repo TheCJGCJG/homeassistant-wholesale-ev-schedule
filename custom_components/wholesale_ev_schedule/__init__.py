@@ -8,7 +8,7 @@ from homeassistant.helpers import entity_registry as er
 from homeassistant.helpers.event import async_track_time_change
 
 from .const import CONF_ENABLE_OPPORTUNISTIC_CHARGING, DOMAIN, PLATFORMS
-from .coordinator import WholesaleEvScheduleCoordinator
+from .coordinator import WholesaleEvScheduleCoordinator, stored_state
 
 # Every opportunistic entity's unique_id is "{entry_id}_opportunistic_..."
 # (see entity.py: unique_id = f"{entry_id}_{unique_id_suffix}", and
@@ -74,6 +74,12 @@ async def async_unload_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     if unloaded:
         hass.data[DOMAIN].pop(entry.entry_id)
     return unloaded
+
+
+async def async_remove_entry(hass: HomeAssistant, entry: ConfigEntry) -> None:
+    """Delete this instance's persisted state when it is removed, so nothing is left behind (and
+    a later instance with the same name cannot inherit a stale schedule or settings)."""
+    await stored_state(hass, entry.entry_id).async_remove()
 
 
 async def _async_update_listener(hass: HomeAssistant, entry: ConfigEntry) -> None:

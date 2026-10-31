@@ -36,10 +36,7 @@ from .factories import (
     FULL_OPTIONS,
     NEXT_RATES_ENTITY,
     SHORT_RANGE_ENTITY,
-    agile_predict_points,
-    agile_rates_points,
     async_setup_wholesale_entry,
-    priced_points,
 )
 
 UTC = UTC
@@ -147,6 +144,60 @@ class PriceWorld:
 
 
 # ---------------------------------------------------------------------------
+# How a feed's points are laid out in the entity (so any provider combination can be fed)
+# ---------------------------------------------------------------------------
+
+
+@dataclass(frozen=True)
+class Shape:
+    """Where a source keeps its points: `attribute` holds the list; each point has the slot's start
+    under `time_key` and its price (p/kWh x `scale`) under `price_key`. Keys may be dotted paths into
+    nested data. `flag_key`, if set, carries the day-ahead "still a prediction" boolean."""
+
+    attribute: str
+    time_key: str
+    price_key: str
+    scale: float = 1.0
+    flag_key: str | None = None
+    z_suffix: bool = False  # render UTC as "...Z" instead of "...+00:00"
+    entity_state: str = "populated"
+
+
+OCTOPUS_SHAPE = Shape("rates", "start", "value_inc_vat", scale=0.01)  # GBP/kWh, as the Octopus integration reports
+AGILE_PREDICT_SHAPE = Shape("prices", "date_time", "agile_pred")
+AGILE_RATES_SHAPE = Shape(
+    "rates",
+    "deliveryStart",
+    "agileRate.result.rate",
+    flag_key="agileRate.result.prediction",
+    z_suffix=True,
+    entity_state="ok",
+)
+
+
+def _set_path(target: dict, path: str, value) -> None:
+    *parents, leaf = path.split(".")
+    for part in parents:
+        target = target.setdefault(part, {})
+    target[leaf] = value
+
+
+def points_for(shape: Shape, slots: list[tuple[datetime, float]], flags: list[bool] | None = None) -> list[dict]:
+    """The attribute list a source with this shape would expose for these (time, p/kWh) slots."""
+    points = []
+    for i, (when, price) in enumerate(slots):
+        utc = when.astimezone(UTC)
+        stamp = utc.strftime("%Y-%m-%dT%H:%M:%SZ") if shape.z_suffix else utc.isoformat()
+        point: dict = {}
+        _set_path(point, shape.time_key, stamp)
+        _set_path(point, shape.price_key, round(price * shape.scale, 6))
+        if shape.flag_key is not None and flags is not None:
+            _set_path(point, shape.flag_key, flags[i])
+        points.append(point)
+    return points
+
+
+# ---------------------------------------------------------------------------
 # One observation of the system
 # ---------------------------------------------------------------------------
 
@@ -172,6 +223,13 @@ class Sim:
     entry: object
     tz: str
     feeds: set = field(default_factory=lambda: {"actual", "forecast"})
+    shapes: dict = field(
+        default_factory=lambda: {
+            "actual": OCTOPUS_SHAPE,
+            "forecast": AGILE_PREDICT_SHAPE,
+            "short_range": AGILE_RATES_SHAPE,
+        }
+    )
     outages: set = field(default_factory=set)
     timeline: list[Tick] = field(default_factory=list)
     charged_minutes: dict = field(default_factory=dict)  # ready_by iso -> minutes the charger was on
@@ -199,13 +257,15 @@ class Sim:
         ready_hour=7,
         step_minutes=5,
         configure=True,
+        shapes=None,
     ):
         await hass.config.async_set_time_zone(tz)
         freezer.move_to(start)
         sim = cls(hass, freezer, world or PriceWorld(), None, tz, feeds=set(feeds), step_minutes=step_minutes)
+        if shapes:
+            sim.shapes = {**sim.shapes, **shapes}
         sim.publish(force=True)
         opts = {**(options if options is not None else FULL_OPTIONS)}
-        opts.setdefault(CONF_DEFAULT_READY_BY_HOUR, ready_hour)
         opts[CONF_DEFAULT_READY_BY_HOUR] = ready_hour
         opts[CONF_DEFAULT_REQUIRED_HOURS] = 0.0 if configure else required_hours
         sim.entry = await async_setup_wholesale_entry(hass, options=opts)
@@ -260,6 +320,7 @@ class Sim:
                 hass.states.async_set(CURRENT_RATES_ENTITY, "unavailable")
                 hass.states.async_set(NEXT_RATES_ENTITY, "unavailable")
             else:
+                shape = self.shapes["actual"]
                 slots = self.world.actual_slots(now)
                 boundary = now.replace(hour=23, minute=0, second=0, microsecond=0)
                 if now.hour >= 23:
@@ -267,27 +328,25 @@ class Sim:
                 current = [(t, p) for t, p in slots if t < boundary]
                 following = [(t, p) for t, p in slots if t >= boundary]
                 for entity, part in ((CURRENT_RATES_ENTITY, current), (NEXT_RATES_ENTITY, following)):
-                    points = priced_points(part[0][0], [p / 100 for _, p in part]) if part else []
-                    hass.states.async_set(entity, "populated", {"rates": points})
+                    hass.states.async_set(entity, shape.entity_state, {shape.attribute: points_for(shape, part)})
         if "forecast" in self.feeds:
             if "forecast" in self.outages:
                 hass.states.async_set(FORECAST_ENTITY, "unavailable")
             else:
-                slots = self.world.forecast_slots(now)
+                shape = self.shapes["forecast"]
                 hass.states.async_set(
-                    FORECAST_ENTITY, "populated", {"prices": agile_predict_points(slots[0][0], [p for _, p in slots])}
+                    FORECAST_ENTITY,
+                    shape.entity_state,
+                    {shape.attribute: points_for(shape, self.world.forecast_slots(now))},
                 )
         if "short_range" in self.feeds:
             if "short_range" in self.outages:
                 hass.states.async_set(SHORT_RANGE_ENTITY, "unavailable")
             else:
+                shape = self.shapes["short_range"]
                 slots, flags = self.world.short_range_slots(now)
                 hass.states.async_set(
-                    SHORT_RANGE_ENTITY,
-                    "ok",
-                    {"rates": agile_rates_points(slots[0][0], [p for _, p in slots], flags)}
-                    if slots
-                    else {"rates": []},
+                    SHORT_RANGE_ENTITY, shape.entity_state, {shape.attribute: points_for(shape, slots, flags)}
                 )
 
     # -- time -------------------------------------------------------------------------------

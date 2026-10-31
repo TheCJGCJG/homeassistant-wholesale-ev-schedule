@@ -84,7 +84,7 @@ from .const import (
     STATE_UNSCHEDULABLE,
     STORAGE_VERSION,
 )
-from .price_parsing import PointSpec, is_estimate, resolve_key
+from .price_parsing import PointSpec, is_estimate, normalize_to_half_hours, resolve_key
 from .providers import (
     FORECAST_PROVIDER_AGILE_PREDICT,
     FORECAST_PROVIDERS,
@@ -135,6 +135,12 @@ SESSION_TIER_REQUIRED = "required"
 SESSION_TIER_OPPORTUNISTIC = "opportunistic"
 
 
+def stored_state(hass: HomeAssistant, entry_id: str) -> Store:
+    """The persisted-state store for one config entry. A single definition so the key used to
+    write it and the key used to delete it (when the entry is removed) cannot drift apart."""
+    return Store(hass, STORAGE_VERSION, f"{DOMAIN}_{entry_id}_state")
+
+
 def _non_blank_text(value) -> str | None:
     """`value` stripped, or None if it isn't a string or is blank -- for an optional
     text option that may be stored as "", whitespace, None, or (from a hand-edited
@@ -180,7 +186,7 @@ class WholesaleEvScheduleCoordinator(DataUpdateCoordinator[dict]):
         self._calculating = False
         # tier -> (inputs key, selected date_times); see _solve. In-memory only.
         self._solve_cache: dict[str, tuple[tuple, frozenset]] = {}
-        self._store = Store(hass, STORAGE_VERSION, f"{DOMAIN}_{entry.entry_id}_state")
+        self._store = stored_state(hass, entry.entry_id)
 
         # Setup-time defaults (see class docstring) -- fall back to the
         # hardcoded DEFAULT_* constants / 0 so an install with none of these
@@ -662,7 +668,7 @@ class WholesaleEvScheduleCoordinator(DataUpdateCoordinator[dict]):
         if not entity:
             return []
 
-        slots = []
+        parsed = []
         # `.get(attribute, [])`'s default only applies when the key is absent -- an
         # explicit `None` (a real pattern for "not yet populated" attributes) would
         # otherwise reach `for point in None:` and crash the whole coordinator update.
@@ -672,7 +678,11 @@ class WholesaleEvScheduleCoordinator(DataUpdateCoordinator[dict]):
                 price_val = resolve_key(point, spec.price_key)
                 if time_val is None or price_val is None:
                     continue
-                slot_dt = dt_util.as_utc(parse_dt(time_val))
+                if isinstance(price_val, bool):
+                    raise ValueError(f"a boolean is not a price: {price_val!r}")
+                # Sub-second noise (".000Z", ".123456") must not stop a slot lining up with the
+                # exact half-hour grid or with the same slot from another source.
+                slot_dt = dt_util.as_utc(parse_dt(time_val)).replace(microsecond=0)
                 raw_price = float(price_val)
                 # float() accepts the strings "nan"/"inf" without error (unlike
                 # "N/A", which correctly raises below) -- treat as malformed the
@@ -681,19 +691,18 @@ class WholesaleEvScheduleCoordinator(DataUpdateCoordinator[dict]):
                 # it not reliably sort to the back (issue #33).
                 if not math.isfinite(raw_price):
                     raise ValueError(f"non-finite price: {price_val!r}")
-                slots.append(
-                    {
-                        "date_time": slot_dt,
-                        "raw_price": round(raw_price * spec.multiplier, 4),
-                        "source": source_for_point(point),
-                    }
-                )
+                parsed.append((slot_dt, round(raw_price * spec.multiplier, 4), point))
             except (TypeError, ValueError, AttributeError) as err:
                 # AttributeError covers a non-dict row (e.g. the attribute shaped as
                 # a dict instead of a list, so `point` is a plain str key) -- not
                 # TypeError/ValueError (issue #32).
                 _LOGGER.debug("Skipping malformed price point from %s: %s", entity_id, err)
-        return slots
+        # A regular hourly or sub-half-hourly feed is put on the 30-minute grid the scheduler
+        # works in; a half-hourly one (the common case) passes through untouched.
+        return [
+            {"date_time": start, "raw_price": price, "source": source_for_point(point)}
+            for start, price, point in normalize_to_half_hours(parsed)
+        ]
 
     def _parse_short_range(self) -> list[dict]:
         spec = self._short_range_spec()
