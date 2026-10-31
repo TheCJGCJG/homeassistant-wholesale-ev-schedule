@@ -78,6 +78,48 @@ custom_components/wholesale_ev_schedule/
   whole-block average. `hybrid` currently returns the same answers as `optimal` (its
   per-run size restriction turned out to bind only on `max_block_hours`, where it was a bug:
   a block cap bounds each *block*, not how many blocks a run can hold).
+- **All scheduling arithmetic is on UTC instants.** Python compares and subtracts two aware
+  datetimes that share a tzinfo by *wall clock* and keys the repeated autumn hour as one entry,
+  so slots built from local times lost or mis-measured time across a clock change (the 25-hour
+  day dropped two slots, runs split at the change, durations were off by an hour). `scheduler.to_utc`
+  is the single conversion; the coordinator ingests prices as UTC and `_sessions_from_slots`
+  renders session start/end back into local time, so what is shown and persisted still carries the
+  local offset. `tests/test_scheduler_dst.py` builds slots from real `ZoneInfo` datetimes.
+- **Rollover credits before it resets.** `_accrue_delivered_hours` runs *before* the `ready_by`
+  rollover zeroes the counters and consumes what it counts (idempotent). A session ending exactly
+  at `ready_by` is first seen as ended on the rollover refresh; crediting it afterwards counted it
+  toward the new cycle and the next requirement read as already delivered (no charging on
+  alternate days). Pinned in `tests/test_sim_scenarios.py`.
+- **An in-progress block follows what the user changes.** Sessions are planned once and carried
+  forward while they run, so `clip_active_session` (running block) and `fit_future_sessions`
+  (upcoming, used when prices are unavailable and the stored plan stands in) cut them to the tier's
+  remaining allowance and deadline. Only *whole slots that ran* are credited on an early stop: a
+  part-slot would be rounded up by the delivered-hours accounting and leave the car short. Setting
+  the required hours is still a deliberate *fresh request* (delivered hours do not carry over).
+- **One short block per request, remembered across re-plans.** Every re-plan solves only the
+  remainder, so without memory each short block that ran earned a fresh allowance and a day could
+  contain several (the min block exists to stop charger cycling). `_short_blocks_used` counts
+  finished required blocks shorter than the minimum (persisted, reset with `_reset_required_progress`)
+  and `find_optimal_slots(avoid_short_block=True)` then prefers a schedule needing none, falling
+  back only if there is no other. `tests/test_sim_cost_quality.py` compares what was paid with the
+  brute-force optimum and checks at most one short block actually runs per request.
+- **Risk adjustment is sign-aware.** `compute_effective_price` divides a doubtful *positive* price
+  by its credibility but multiplies a *negative* one, otherwise a forecast -5p looks better than a
+  real -5p ("plunge pricing").
+- **Non-half-hourly feeds are normalised.** `price_parsing.normalize_to_half_hours` turns a regular
+  hourly feed into two slots per point and averages regular 15/10/5-minute feeds into half hours;
+  half-hourly and irregular feeds are untouched (needs 4+ points and >=80% regular gaps, and it
+  never invents prices across a hole).
+- **Stored state is sanitised on load.** `_parse_stored_float` rejects non-finite/non-numeric/boolean
+  values and clamps to the *same* ranges the number entities enforce (`const.RANGE_*`, one
+  definition); dates are bounded, sessions must be plausible, enums are checked with `isinstance`
+  first (a stored list is unhashable), and session lengths always come from start/end
+  (`session_slots`), never the display field. A NaN/inf previously left the entry stuck in
+  `setup_retry`. `tests/test_stored_state.py` is the matrix.
+- **Removing an instance deletes its stored state** (`async_remove_entry`; the key is built by
+  `coordinator.stored_state` so create and delete cannot drift).
+- **`next_slot` is the earliest upcoming session** across both tiers (`prune_and_classify` returns
+  futures in time order, sorted on instants so it holds across a clock change).
 - **There's no live `max_block_hours` entity** — it was removed as an
   unnecessary second knob (it only ever capped window *selection* size
   without guaranteeing an actual rest period; genuine multi-block scheduling
@@ -200,7 +242,7 @@ the attribute/key names and multiplier directly.
 
 ## Testing
 
-All tests run inside Docker (`public.ecr.aws/docker/library/python:trixie`):
+All tests run inside Docker (`public.ecr.aws/docker/library/python:trixie`), in parallel (`-n auto`, via pytest-xdist; use `-n 0` to debug one test):
 
 ```bash
 ./run-tests.sh              # run tests
@@ -238,6 +280,12 @@ What each test file covers:
 - `tests/test_opportunistic_ready_by_rollover.py` — opportunistic_ready_by defaulting to ready_by + offset, a manual edit holding only until the next required-ready_by rollover, rolling forward correctly across several rollovers, and a manual edit to required ready_by NOT itself perturbing opportunistic_ready_by
 - `tests/test_opportunistic_lifecycle.py` — Stop zeroes the opportunistic target but keeps tuning preferences/deadline; Reset restores opportunistic defaults and re-derives opportunistic_ready_by immediately (not left unset until the next natural rollover); opportunistic state survives a genuine restart; a pre-opportunistic stored session with no "tier" key defaults to the required counter on upgrade
 - `tests/test_opportunistic_reconfigure.py` — enabling/disabling opportunistic charging via the actual options-flow UI walk adds/removes exactly the opportunistic entities, and a direct options update takes effect after reload
+- `tests/sim.py` + `tests/test_sim_*.py` — **the simulator**. `Sim` runs the real integration through simulated days: a seeded `PriceWorld` (Agile rates published ~15:00Z for the next day, a forecast whose error grows with horizon, day-ahead estimates that firm up), any feed layout (`Shape`), HA timezone, outages, restarts (`sim.restart()` builds a brand-new coordinator from storage), user actions (`sim.act(...)`) and a notional charger, and calls `check_invariants` after every step (sorted non-overlapping sessions, state/desired/override consistency, never over-committed, deadline and price cap respected, next/active slot match the list, a fresh plan respects the minimum block, delivered hours monotonic, stored state serialisable). Scenario files: `test_sim_scenarios.py` (daily cycles in 11 timezones across clock changes; deadline hours in the DST gap/fold; the rollover regression), `test_sim_restart.py` (a restart changes nothing, at every step), `test_sim_user_actions.py` (hours/deadline/cap/override/boost/stop/reset mid-run, in-progress blocks), `test_sim_feeds.py` (source strategies, publication timing, outages incl. edits during an outage), `test_sim_opportunistic.py`, `test_sim_reconfigure.py` (options changes on a running install), `test_sim_cost_quality.py` (paid vs the brute-force optimum; at most one short block runs), and `test_sim_chaos.py` (seeded random everything; a failure prints the seed and last actions -- replay it, then write a focused test).
+- `tests/oracle.py` + `tests/test_scheduler_oracle.py` — an exhaustive brute-force reference for slot selection (enumerates every subset, keeps valid ones, takes the cheapest). `optimal` must equal it exactly, nothing may ever return an invalid schedule, greedy/hybrid may never beat it, and `avoid_short_block` is checked against its `max_short=0` variant. Verified at 30,000 random markets during development; CI runs ~1,000.
+- `tests/test_scheduler_dst.py`, `tests/test_next_ready_by_sweep.py` — pure scheduler functions with real `ZoneInfo` datetimes across London/New York/Sydney/Lord Howe clock changes; `next_ready_by` swept over eight zones x every half hour x eight hours x three offsets
+- `tests/test_clip_active_session.py`, `tests/test_session_ordering.py`, `tests/test_scheduler_pricing_edges.py`, `tests/test_price_grid.py` — pure unit tests for block clipping/fitting, chronological sessions, negative/zero/huge prices, and the 30-minute-grid normaliser
+- `tests/test_stored_state.py` — every stored field x garbage / non-finite / out-of-range / wrong type; extreme dates; implausible sessions; lossless round trip
+- `tests/test_entity_contracts.py`, `tests/test_instances.py`, `tests/test_config_matrix.py`, `tests/test_price_formats.py`, `tests/test_registry_and_hygiene.py` — entities through real service calls and the attribute contract in every state; multi-instance isolation and removal cleanup; all 72 provider combinations created via the real config flow and fed their own data layout (asserting each configured source actually contributed); timestamp/number/ordering/granularity robustness; provider-registry and release-hygiene guards
 
 ## Linting and security scanning
 

@@ -132,6 +132,10 @@ something sensible out of the box — see below):
   manually any time you need a different deadline.
 - **Charging hours required** (`number`) — how many hours of charging you
   need. Defaults to 12 (configurable at setup time). Set to 0 to go idle.
+  Setting it is a fresh request: hours already delivered don't count towards the
+  new number. Changes apply to a charge that's already running too — lower the
+  hours (or pull the deadline in) and the current block is shortened or stopped
+  at the new limit rather than running to the end of its original plan.
 
 **Tune scheduling behaviour anytime** (these have sensible defaults,
 configurable at setup time, most people won't need to touch them):
@@ -140,7 +144,10 @@ configurable at setup time, most people won't need to touch them):
   Higher = more willing to bet on forecasts.
 - **Minimum block length** (default 4h, 0–24h) — won't schedule a charging
   session shorter than this, to avoid rapidly switching your charger on and
-  off. Set to 0 for no minimum at all.
+  off. Set to 0 for no minimum at all. At most one block per request may be
+  shorter than this (the "last" one, when the hours don't divide neatly) —
+  once a short block has run, later re-plans won't add another unless there's
+  genuinely no other way to meet your hours.
 - **Maximum price** (default 20) — won't schedule anything above this
   average price per session, even if it means missing your target hours.
   This is a plain number, not currency-aware — it's compared directly
